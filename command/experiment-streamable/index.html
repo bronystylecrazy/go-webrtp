@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raw RTP Stream</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+            font-size: 24px;
+            color: #00ff88;
+        }
+
+        .video-container {
+            position: relative;
+            background: #1a1a1a;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0, 255, 136, 0.1);
+        }
+
+        canvas {
+            display: block;
+            max-width: 100%;
+            width: 640px;
+            height: auto;
+            background: #000;
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        button {
+            padding: 12px 24px;
+            background: #00ff88;
+            color: #000;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #00cc6a;
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 16px 24px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            font-size: 14px;
+            text-align: center;
+            max-width: 640px;
+            width: 100%;
+            transition: border-color 0.3s;
+        }
+
+        .status.disconnected { border-left: 4px solid #ff4444; }
+        .status.connecting   { border-left: 4px solid #ffaa00; }
+        .status.connected    { border-left: 4px solid #00ff88; }
+        .status.error        { border-left: 4px solid #ff4444; color: #ff8888; }
+
+        .stats {
+            margin-top: 20px;
+            padding: 16px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            font-size: 12px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            color: #888;
+            max-width: 640px;
+            width: 100%;
+        }
+
+        .stats span {
+            display: inline-block;
+            margin-right: 20px;
+        }
+
+        .info {
+            margin-top: 30px;
+            padding: 20px;
+            background: #111;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #666;
+            max-width: 640px;
+            width: 100%;
+        }
+
+        .info h3 {
+            color: #888;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .info p {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+
+        .info code {
+            background: #1a1a1a;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #00ff88;
+            font-size: 11px;
+        }
+
+        .no-stream {
+            color: #ffaa00;
+            padding: 20px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            text-align: center;
+            max-width: 640px;
+            display: none;
+        }
+
+        .no-stream.show { display: block; }
+    </style>
+</head>
+<body>
+<h1>Raw RTP Stream</h1>
+
+<div class="no-stream" id="noStreamMsg">
+    <strong>Streaming API is not supported in this browser.</strong><br>
+    Please use a modern browser with ReadableStream support.
+</div>
+
+<div class="video-container">
+    <canvas id="videoCanvas" width="640" height="480"></canvas>
+</div>
+
+<div class="controls">
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+    <button id="statsBtn" disabled>Show Stats</button>
+</div>
+
+<div id="status" class="status disconnected">
+    Status: Disconnected
+</div>
+
+<div id="stats" class="stats" style="display: none;">
+    <span id="statPackets">Packets: 0</span>
+    <span id="statBytes">Bytes: 0 B</span>
+    <span id="statBitrate">Bitrate: 0 bps</span>
+</div>
+
+<div class="info">
+    <h3>About</h3>
+    <p>This demo uses raw binary streaming to receive RTP packets from an RTSP source.</p>
+    <p><strong>Server:</strong> <code>./experiment-streamable --rtsp rtsp://your-server/stream</code></p>
+    <p><strong>Port:</strong> Default is 8080, use <code>--port</code> to change.</p>
+    <p>Raw binary streaming is more efficient than base64-encoded SSE.</p>
+</div>
+
+<script>
+    // ─── Streaming support check ───────────────────────────────────────────────
+    if (!('ReadableStream' in window) || !('fetch' in window)) {
+        document.getElementById('noStreamMsg').classList.add('show');
+        document.getElementById('connectBtn').disabled = true;
+    }
+
+    // ─── State ────────────────────────────────────────────────────────────────
+    let abortController = null;
+    let videoDecoder = null;
+    let statsInterval = null;
+
+    let frameCount = 0;
+    let byteCount  = 0;
+    let startTime  = null;
+
+    // ─── DOM refs ─────────────────────────────────────────────────────────────
+    const canvas        = document.getElementById('videoCanvas');
+    const ctx           = canvas.getContext('2d');
+    const connectBtn    = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const statsBtn      = document.getElementById('statsBtn');
+    const statusEl      = document.getElementById('status');
+    const statsEl       = document.getElementById('stats');
+
+    // ─── Status helper ────────────────────────────────────────────────────────
+    function StatusSet(state, detail) {
+        statusEl.className = `status ${state}`;
+        const label = state.charAt(0).toUpperCase() + state.slice(1);
+        statusEl.textContent = detail ? `Status: ${label} — ${detail}` : `Status: ${label}`;
+    }
+
+    // ─── Stats display ────────────────────────────────────────────────────────
+    function StatsUpdate() {
+        if (!startTime) return;
+        const elapsed = (Date.now() - startTime) / 1000;
+        const bitrate = elapsed > 0 ? Math.floor((byteCount * 8) / elapsed) : 0;
+        const mb      = (byteCount / 1024 / 1024).toFixed(2);
+
+        document.getElementById('statPackets').textContent = `Packets: ${frameCount.toLocaleString()}`;
+        document.getElementById('statBytes').textContent   = `Bytes: ${mb} MB`;
+        document.getElementById('statBitrate').textContent = `Bitrate: ${bitrate.toLocaleString()} bps`;
+    }
+
+    // ─── Connect ──────────────────────────────────────────────────────────────
+    async function Connect() {
+        try {
+            StatusSet('connecting');
+            connectBtn.disabled = true;
+
+            // * create abort controller for cancellation
+            abortController = new AbortController();
+            const signal = abortController.signal;
+
+            // * start streaming request
+            const response = await fetch('http://localhost:8080/stream', {
+                signal: signal,
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            StatusSet('connected');
+            disconnectBtn.disabled = false;
+            statsBtn.disabled      = false;
+            startTime = Date.now();
+            statsInterval = setInterval(StatsUpdate, 1000);
+
+            // * process binary stream
+            const reader = response.body.getReader();
+            await ProcessStream(reader);
+
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                StatusSet('disconnected');
+            } else {
+                console.error('Stream error:', error);
+                StatusSet('error', error.message);
+            }
+            ResetUI();
+        }
+    }
+
+    // ─── Process binary stream ────────────────────────────────────────────────
+    async function ProcessStream(reader) {
+        try {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    console.log('Stream ended');
+                    break;
+                }
+
+                // * value is Uint8Array containing raw RTP packet
+                ProcessRTPPacket(value);
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    // ─── Process RTP packet ───────────────────────────────────────────────────
+    function ProcessRTPPacket(data) {
+        frameCount++;
+        byteCount += data.byteLength;
+
+        if (typeof VideoDecoder !== 'undefined') {
+            DecodeWithWebCodecs(data);
+        } else {
+            DisplayRTPInfo(data);
+        }
+    }
+
+    // ─── WebCodecs H.264 decoder ──────────────────────────────────────────────
+    function InitDecoder() {
+        if (videoDecoder && videoDecoder.state !== 'closed') return;
+
+        videoDecoder = new VideoDecoder({
+            output: (frame) => {
+                // * update canvas size if needed
+                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                    canvas.width  = frame.displayWidth;
+                    canvas.height = frame.displayHeight;
+                }
+                ctx.drawImage(frame, 0, 0);
+                frame.close();
+            },
+            error: (err) => {
+                console.warn('VideoDecoder error:', err);
+                // * reset so it can be re-initialized
+                videoDecoder = null;
+            }
+        });
+
+        videoDecoder.configure({
+            codec:             'avc1.42E01E', // * H.264 Baseline Level 3.0
+            optimizeForLatency: true,
+        });
+    }
+
+    function DecodeWithWebCodecs(data) {
+        try {
+            InitDecoder();
+
+            // * RTP header is fixed 12 bytes (no CSRC, no extension assumed)
+            if (data.byteLength <= 12) return;
+
+            const view    = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            const hasExt  = (view.getUint8(0) & 0x10) !== 0;  // * extension bit
+            const cc      = (view.getUint8(0) & 0x0F);         // * CSRC count
+            let   offset  = 12 + cc * 4;                        // * base header + CSRCs
+
+            // * skip extension header if present
+            if (hasExt && data.byteLength > offset + 4) {
+                const extLen = view.getUint16(offset + 2);
+                offset += 4 + extLen * 4;
+            }
+
+            if (offset >= data.byteLength) return;
+
+            const payload   = data.slice(offset);
+            const timestamp = view.getUint32(4); // * RTP timestamp (32-bit)
+
+            const chunk = new EncodedVideoChunk({
+                type:      'key',                       // * let decoder figure it out
+                timestamp: timestamp / 90,              // * 90kHz clock → ms
+                data:      payload
+            });
+
+            videoDecoder.decode(chunk);
+
+        } catch (err) {
+            console.warn('Decode failed, falling back to info display:', err.message);
+            DisplayRTPInfo(data);
+        }
+    }
+
+    // ─── Fallback: visualize raw RTP packet ───────────────────────────────────
+    function DisplayRTPInfo(data) {
+        ctx.fillStyle = '#0a0a0a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#00ff88';
+        ctx.font      = '13px Monaco, monospace';
+        ctx.fillText(`RTP packets received: ${frameCount.toLocaleString()}`, 20, 35);
+
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        if (data.byteLength >= 12) {
+            const seq  = view.getUint16(2);
+            const ts   = view.getUint32(4);
+            const ssrc = view.getUint32(8);
+            ctx.fillStyle = '#888';
+            ctx.fillText(`Seq: ${seq}  TS: ${ts}  SSRC: 0x${ssrc.toString(16).padStart(8,'0')}`, 20, 58);
+            ctx.fillText(`Size: ${data.byteLength} bytes`, 20, 78);
+        }
+
+        // * pixel heatmap of packet payload
+        const blockSize   = 4;
+        const blocksPerRow = Math.floor((canvas.width - 40) / blockSize);
+        const maxBytes    = Math.min(data.byteLength, blocksPerRow * 40);
+        for (let i = 0; i < maxBytes; i++) {
+            const byte      = data[i];
+            const intensity = byte / 255;
+            ctx.fillStyle   = `rgb(${Math.floor(intensity * 80)}, ${Math.floor(intensity * 220)}, ${Math.floor(intensity * 130)})`;
+            const bx = 20 + (i % blocksPerRow) * blockSize;
+            const by = 100 + Math.floor(i / blocksPerRow) * blockSize;
+            ctx.fillRect(bx, by, blockSize - 1, blockSize - 1);
+        }
+    }
+
+    // ─── Disconnect ───────────────────────────────────────────────────────────
+    function Disconnect() {
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
+        }
+        CleanupDecoder();
+        ResetUI();
+        StatusSet('disconnected');
+    }
+
+    function CleanupDecoder() {
+        if (videoDecoder && videoDecoder.state !== 'closed') {
+            videoDecoder.close();
+        }
+        videoDecoder = null;
+    }
+
+    function ResetUI() {
+        clearInterval(statsInterval);
+        statsInterval = null;
+        connectBtn.disabled    = false;
+        disconnectBtn.disabled = true;
+        statsBtn.disabled      = true;
+
+        // * reset canvas
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle   = '#333';
+        ctx.font        = '16px -apple-system, sans-serif';
+        ctx.textAlign   = 'center';
+        ctx.fillText('Click "Connect" to start streaming', canvas.width / 2, canvas.height / 2);
+        ctx.textAlign   = 'left';
+    }
+
+    // ─── Event listeners ──────────────────────────────────────────────────────
+    connectBtn.addEventListener('click', Connect);
+    disconnectBtn.addEventListener('click', Disconnect);
+    statsBtn.addEventListener('click', () => {
+        statsEl.style.display = statsEl.style.display === 'none' ? 'block' : 'none';
+    });
+    window.addEventListener('beforeunload', () => {
+        if (abortController) abortController.abort();
+    });
+
+    // ─── Initial canvas state ─────────────────────────────────────────────────
+    ResetUI();
+</script>
+</body>
+</html>
