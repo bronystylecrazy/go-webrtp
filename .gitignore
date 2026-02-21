@@ -1,0 +1,16 @@
+# system
+.DS_Store
+Thumbs.db
+
+# development
+.idea
+.vscode
+
+# local
+*.local.yml
+.local
+
+# generate
+/generate
+/build
+zzz.go
