@@ -3,22 +3,19 @@ module github.com/connectedtechco/go-webtransport-rtp
 go 1.25.0
 
 require (
+	github.com/Eyevinn/mp4ff v0.51.0
 	github.com/alecthomas/kong v1.14.0
-	github.com/bluenviron/gohlslib/v2 v2.2.5
 	github.com/bluenviron/gortsplib/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/pion/rtp v1.10.1
 	github.com/quic-go/quic-go v0.59.0
 	github.com/quic-go/webtransport-go v0.10.0
 )
 
 require (
-	github.com/abema/go-mp4 v1.4.1 // indirect
-	github.com/asticode/go-astikit v0.30.0 // indirect
-	github.com/asticode/go-astits v1.14.0 // indirect
 	github.com/bluenviron/mediacommon/v2 v2.7.1 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.16 // indirect

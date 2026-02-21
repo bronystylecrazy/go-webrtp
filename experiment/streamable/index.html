@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live Stream</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #080808; --surface: #0f0f0f; --border: #1e1e1e;
+            --accent: #00ff87; --text: #e8e8e8; --muted: #444; --bad: #ff4444;
+        }
+        body {
+            background: var(--bg); color: var(--text);
+            font-family: 'Courier New', monospace;
+            min-height: 100vh; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; padding: 24px;
+        }
+        .wrap { width: 100%; max-width: 1280px; display: flex; flex-direction: column; }
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 14px; background: var(--surface);
+            border: 1px solid var(--border); border-bottom: none;
+        }
+        .logo { font-size: 11px; font-weight: bold; letter-spacing: .2em; color: var(--accent); }
+        .pills { display: flex; gap: 16px; }
+        .pill { display: flex; align-items: center; gap: 6px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+        .pill.on { color: var(--accent); }
+        .pill.err { color: var(--bad); }
+        .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .pill.on .dot { box-shadow: 0 0 6px var(--accent); animation: blink 1.4s ease-in-out infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+        .stage { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border: 1px solid var(--border); overflow: hidden; }
+        canvas { width: 100%; height: 100%; display: block; }
+        .overlay {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 10px;
+            background: #000; transition: opacity .3s; pointer-events: none;
+        }
+        .overlay.gone { opacity: 0; }
+        .spin { width: 28px; height: 28px; border: 2px solid #222; border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .ovtxt { font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); }
+        .bar {
+            display: flex; gap: 20px; align-items: center; padding: 7px 14px;
+            background: var(--surface); border: 1px solid var(--border); border-top: none;
+        }
+        .s { display: flex; align-items: baseline; gap: 5px; }
+        .sl { font-size: 9px; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); }
+        .sv { font-size: 12px; }
+        .sv.g { color: var(--accent); } .sv.w { color: #fa0; } .sv.b { color: var(--bad); }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="topbar">
+        <span class="logo">◉ Live Feed</span>
+        <div class="pills">
+            <div class="pill" id="p-ws"><div class="dot"></div><span id="l-ws">Connecting</span></div>
+            <div class="pill" id="p-st"><div class="dot"></div><span id="l-st">Waiting</span></div>
+        </div>
+    </div>
+    <div class="stage">
+        <canvas id="c"></canvas>
+        <div class="overlay" id="ov">
+            <div class="spin"></div>
+            <div class="ovtxt" id="ovtxt">Connecting…</div>
+        </div>
+    </div>
+    <div class="bar">
+        <div class="s"><span class="sl">FPS</span><span class="sv" id="s-fps">—</span></div>
+        <div class="s"><span class="sl">Frames</span><span class="sv" id="s-fr">0</span></div>
+        <div class="s"><span class="sl">Dropped</span><span class="sv" id="s-dr">0</span></div>
+        <div class="s"><span class="sl">Kbps</span><span class="sv" id="s-kb">—</span></div>
+        <div class="s"><span class="sl">Latency</span><span class="sv" id="s-lat">—</span></div>
+    </div>
+</div>
+<script>
+    // ── DOM refs ──────────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('c');
+    const ctx    = canvas.getContext('2d', { alpha: false });
+    const ov     = document.getElementById('ov');
+    const ovtxt  = document.getElementById('ovtxt');
+
+    function setPill(id, state, label) {
+        const p = document.getElementById('p-' + id);
+        p.className = 'pill' + (state ? ' ' + state : '');
+        document.getElementById('l-' + id).textContent = label;
+    }
+    function hideOverlay() { ov.classList.add('gone'); }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────────
+    let totalFrames = 0, dropped = 0, bytes = 0;
+    let fpsBase = performance.now(), fpsCount = 0;
+    let latSum = 0, latCount = 0;
+
+    function statFrame(recvMs) {
+        totalFrames++;
+        fpsCount++;
+        document.getElementById('s-fr').textContent = totalFrames;
+        const now = performance.now();
+        if (now - fpsBase >= 1000) {
+            const fps = Math.round(fpsCount * 1000 / (now - fpsBase));
+            const el = document.getElementById('s-fps');
+            el.textContent = fps;
+            el.className = 'sv ' + (fps >= 8 ? 'g' : fps >= 4 ? 'w' : 'b');
+            fpsCount = 0; fpsBase = now;
+        }
+        // latency = time from WS message arrival to frame drawn
+        const lat = Math.round(performance.now() - recvMs);
+        latSum += lat; latCount++;
+        if (latCount % 10 === 0) {
+            const avg = Math.round(latSum / latCount);
+            const el = document.getElementById('s-lat');
+            el.textContent = avg + 'ms';
+            el.className = 'sv ' + (avg < 30 ? 'g' : avg < 80 ? 'w' : 'b');
+            latSum = 0; latCount = 0;
+        }
+    }
+
+    setInterval(() => {
+        document.getElementById('s-dr').textContent = dropped;
+        document.getElementById('s-dr').className = 'sv ' + (dropped === 0 ? 'g' : dropped < 5 ? 'w' : 'b');
+    }, 500);
+
+    let lastBytes = 0, lastBytesT = performance.now();
+    setInterval(() => {
+        const now = performance.now();
+        const kbps = Math.round((bytes - lastBytes) * 8 / (now - lastBytesT));
+        document.getElementById('s-kb').textContent = kbps;
+        lastBytes = bytes; lastBytesT = now;
+    }, 1000);
+
+    // ── Parse init segment for avcC descriptor ───────────────────────────────────
+    // Returns { codec: 'avc1.xxyyzz', description: ArrayBuffer } or null for HEVC.
+    function parseInit(buf) {
+        const b = new Uint8Array(buf);
+        for (let i = 0; i < b.length - 8; i++) {
+            // avcC
+            if (b[i]===0x61&&b[i+1]===0x76&&b[i+2]===0x63&&b[i+3]===0x43) {
+                const payStart = i + 4;
+                const boxSize  = ((b[i-4]<<24)|(b[i-3]<<16)|(b[i-2]<<8)|b[i-1]) >>> 0;
+                const payLen   = boxSize - 8;
+                const profile  = b[payStart+1].toString(16).padStart(2,'0');
+                const compat   = b[payStart+2].toString(16).padStart(2,'0');
+                const level    = b[payStart+3].toString(16).padStart(2,'0');
+                return {
+                    codec:       'avc1.' + profile + compat + level,
+                    description: buf.slice(payStart, payStart + payLen),
+                };
+            }
+            // hvcC
+            if (b[i]===0x68&&b[i+1]===0x76&&b[i+2]===0x63&&b[i+3]===0x43) {
+                const payStart = i + 4;
+                const boxSize  = ((b[i-4]<<24)|(b[i-3]<<16)|(b[i-2]<<8)|b[i-1]) >>> 0;
+                return {
+                    codec:       'hvc1.1.6.L93.B0',
+                    description: buf.slice(payStart, payStart + boxSize - 8),
+                };
+            }
+        }
+        return { codec: 'avc1.640028', description: null };
+    }
+
+    // ── Extract mdat payload + detect IDR by scanning AVCC NAL units ─────────────
+    function parseFrag(buf) {
+        const b = new Uint8Array(buf);
+        for (let i = 0; i < b.length - 8; i++) {
+            if (b[i+4]===0x6D&&b[i+5]===0x64&&b[i+6]===0x61&&b[i+7]===0x74) {
+                const size    = ((b[i]<<24)|(b[i+1]<<16)|(b[i+2]<<8)|b[i+3]) >>> 0;
+                const payload = buf.slice(i + 8, i + size);
+                // Walk AVCC NALs to find IDR (type 5)
+                const p = new Uint8Array(payload);
+                let isKey = false, pos = 0;
+                while (pos + 4 < p.length) {
+                    const nl = ((p[pos]<<24)|(p[pos+1]<<16)|(p[pos+2]<<8)|p[pos+3]) >>> 0;
+                    if (nl === 0 || pos + 4 + nl > p.length) break;
+                    const t = p[pos+4] & 0x1F;
+                    if (t === 5) { isKey = true; break; }
+                    if (t === 1) break;
+                    pos += 4 + nl;
+                }
+                return { payload, isKey };
+            }
+        }
+        return { payload: buf, isKey: false };
+    }
+
+    // ── WebCodecs decoder ─────────────────────────────────────────────────────────
+    let decoder = null;
+    let frameIndex = 0;  // monotonic counter for timestamps
+
+    function makeDecoder(codec, description) {
+        if (decoder && decoder.state !== 'closed') {
+            try { decoder.close(); } catch(_) {}
+        }
+
+        decoder = new VideoDecoder({
+            output: (frame) => {
+                // Draw IMMEDIATELY — this callback fires as soon as decode() produces output
+                const w = frame.displayWidth, h = frame.displayHeight;
+                if (canvas.width !== w || canvas.height !== h) {
+                    canvas.width = w; canvas.height = h;
+                }
+                ctx.drawImage(frame, 0, 0, w, h);
+                frame.close();
+            },
+            error: (e) => {
+                console.warn('decoder error:', e.message);
+                dropped++;
+            },
+        });
+
+        const cfg = {
+            codec,
+            optimizeForLatency: true,
+            hardwareAcceleration: 'prefer-hardware',
+        };
+        if (description) cfg.description = description;
+        decoder.configure(cfg);
+        console.log('decoder configured:', codec);
+    }
+
+    // ── Main ──────────────────────────────────────────────────────────────────────
+    let initDone = false;
+    let firstFrame = true;
+    let codec = null;
+    let desc  = null;
+
+    const ws = new WebSocket('ws://' + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+        setPill('ws', 'on', 'Connected');
+        ovtxt.textContent = 'Waiting for stream…';
+    };
+    ws.onclose = () => {
+        setPill('ws', 'err', 'Disconnected');
+        setPill('st', 'err', 'Offline');
+        setTimeout(() => location.reload(), 3000);
+    };
+    ws.onerror = () => setPill('ws', 'err', 'Error');
+
+    ws.onmessage = (e) => {
+        const recvMs = performance.now(); // timestamp exactly when packet arrived
+        bytes += e.data.byteLength;
+
+        if (!initDone) {
+            // First message = fMP4 init segment
+            initDone = true;
+            const parsed = parseInit(e.data);
+            codec = parsed.codec;
+            desc  = parsed.description;
+            makeDecoder(codec, desc);
+            ovtxt.textContent = 'Decoding…';
+            setPill('st', '', 'Decoding');
+            return;
+        }
+
+        if (!decoder || decoder.state !== 'configured') return;
+
+        const { payload, isKey } = parseFrag(e.data);
+
+        // Use a simple counter for timestamps — avoids any jitter from RTP clock or
+        // performance.now(). WebCodecs only needs monotonically increasing timestamps.
+        // We space them 100ms apart (10fps). Actual display timing is driven by draw,
+        // not by timestamp — so this value doesn't affect latency at all.
+        const ts = (++frameIndex) * 100_000; // microseconds
+
+        try {
+            decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts, data: payload }));
+            statFrame(recvMs);
+
+            if (firstFrame && isKey) {
+                firstFrame = false;
+                // Output callback will draw; we just need to hide overlay after first decode
+                // Use a tiny rAF so the canvas has painted before we remove the overlay
+                requestAnimationFrame(() => {
+                    hideOverlay();
+                    setPill('st', 'on', 'Live');
+                });
+            }
+        } catch(err) {
+            console.warn('decode():', err.message);
+            dropped++;
+            // If decoder is unhappy, reset it — it will recover on the next keyframe
+            if (decoder.state !== 'configured') {
+                makeDecoder(codec, desc);
+            }
+        }
+    };
+</script>
+</body>
+</html>
