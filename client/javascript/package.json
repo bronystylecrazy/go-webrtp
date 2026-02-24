@@ -1,0 +1,24 @@
+{
+  "name": "@connectedtechco/webrtp",
+  "version": "1.0.0",
+  "description": "WebRTP WebSocket client for receiving video streams",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["webrtp", "rtsp", "streaming", "video", "websocket"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

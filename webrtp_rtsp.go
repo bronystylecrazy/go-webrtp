@@ -2,6 +2,7 @@ package webrtp
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
@@ -53,8 +54,19 @@ func (r *rtspHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 		}
 	}
 	r.prevTS = ts
-	avcc := AnnexbToAvcc(au)
+
+	// Convert all NAL units to AVCC format (4-byte big-endian length prefix)
+	var avccData []byte
+	for _, nalu := range au {
+		ln := make([]byte, 4)
+		binary.BigEndian.PutUint32(ln, uint32(len(nalu)))
+		avccData = append(avccData, ln...)
+		avccData = append(avccData, nalu...)
+	}
+	avcc := avccData
+
 	r.seqNr++
+
 	frag, err := BuildFragment(r.seqNr, dts, dur, isIDR, avcc)
 	if err != nil {
 		r.logger.Printf("buildFragment: %v", err)

@@ -49,11 +49,14 @@ func BuildInitH265(vps, sps, pps []byte) ([]byte, error) {
 // AnnexbToAvcc converts Annex-B NAL units to AVCC format.
 func AnnexbToAvcc(au [][]byte) []byte {
 	var buf bytes.Buffer
-	for _, nalu := range au {
+	for idx, nalu := range au {
 		ln := make([]byte, 4)
 		binary.BigEndian.PutUint32(ln, uint32(len(nalu)))
 		buf.Write(ln)
 		buf.Write(nalu)
+		if idx < 3 && len(nalu) > 0 {
+			fmt.Printf("[AnnexbToAvcc] NAL %d: len=%d, first_bytes=%x\n", idx, len(nalu), nalu[:min(8, len(nalu))])
+		}
 	}
 	return buf.Bytes()
 }
