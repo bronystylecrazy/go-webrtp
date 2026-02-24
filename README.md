@@ -1,4 +1,5 @@
 # go-webrtp
+
 Golang library for streaming RTP packet from RTSP source directly to web in real-time.
 
 ## Usage
@@ -7,7 +8,7 @@ Golang library for streaming RTP packet from RTSP source directly to web in real
 package main
 
 func main() {
-	
+
 }
 ```
 
@@ -15,7 +16,13 @@ func main() {
 
 1. Generate self-signed certificate for TLS connection
 
-```bash
-mkdir -p .local
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -keyout .local/x509-key.pem -out .local/x509-cer.pem -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-```
+    ```bash
+    mkdir -p .local
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -keyout .local/x509-key.pem -out .local/x509-cer.pem -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    ```
+
+2. Run example
+
+    ```bash
+    go run ./experiment/webtransport/main.go
+    ```

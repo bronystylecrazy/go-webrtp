@@ -1,0 +1,4 @@
+upstreams:
+  - name: camera1
+    rtspUrl: rtsp://localhost:8554/stream1
+  - rtspUrl: rtsp://localhost:8554/stream2
