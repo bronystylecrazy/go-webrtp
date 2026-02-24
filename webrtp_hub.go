@@ -89,17 +89,21 @@ func (r *Hub) Broadcast(data []byte) {
 	}
 }
 
+type Status struct {
+	Streams []*StreamStats `json:"streams"`
+}
+
 type StreamStats struct {
-	Name        string
-	Ready       bool
-	Codec       string
-	Width       int
-	Height      int
-	Fps         float64
-	ClientCount int32
-	BytesRecv   uint64
-	Bitrate     float64
-	Uptime      time.Duration
+	Name        string        `json:"name"`
+	Ready       bool          `json:"ready"`
+	Codec       string        `json:"codec"`
+	Width       int           `json:"width"`
+	Height      int           `json:"height"`
+	Framerate   float64       `json:"framerate"`
+	ClientCount int32         `json:"clientCount"`
+	BytesRecv   uint64        `json:"bytesRecv"`
+	Bitrate     float64       `json:"bitrateKbps"`
+	Uptime      time.Duration `json:"uptime"`
 }
 
 func (r *Hub) GetStats(name string) StreamStats {
@@ -121,10 +125,17 @@ func (r *Hub) GetStats(name string) StreamStats {
 		Codec:       codec,
 		Width:       width,
 		Height:      height,
-		Fps:         frameRate,
+		Framerate:   frameRate,
 		ClientCount: r.clientCount.Load(),
 		BytesRecv:   bytes,
 		Bitrate:     bitrate,
 		Uptime:      elapsed,
+	}
+}
+
+func (r *Hub) GetStatus() Status {
+	stats := r.GetStats("")
+	return Status{
+		Streams: []*StreamStats{&stats},
 	}
 }

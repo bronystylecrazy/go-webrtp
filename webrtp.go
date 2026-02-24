@@ -53,7 +53,7 @@ func Init(cfg *Config) *Instance {
 	}
 }
 
-func (r *Instance) Ready() bool {
+func (r *Instance) InstanceReady() bool {
 	return r.hub.GetInit() != nil
 }
 

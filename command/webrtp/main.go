@@ -92,8 +92,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 var (
 	headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	greenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	yellowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+	whiteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
@@ -127,14 +126,14 @@ func (m *Model) View() string {
 
 		rows = append(rows, table.Row{
 			strconv.Itoa(i),
-			name,
-			status,
-			stats.Codec,
-			fmt.Sprintf("%dx%d", stats.Width, stats.Height),
-			fmt.Sprintf("%.1f", stats.Fps),
-			fmt.Sprintf("%d", stats.ClientCount),
-			fmt.Sprintf("%.1f kbps", stats.Bitrate),
-			fmt.Sprintf("%.2f MB", float64(stats.BytesRecv)/1024/1024),
+			truncateCell(name, 15),
+			truncateCell(status, 10),
+			truncateCell(stats.Codec, 8),
+			truncateCell(fmt.Sprintf("%dx%d", stats.Width, stats.Height), 12),
+			truncateCell(fmt.Sprintf("%.1f", stats.Framerate), 11),
+			truncateCell(fmt.Sprintf("%.1f kbps", stats.Bitrate), 15),
+			truncateCell(fmt.Sprintf("%.2f MB", float64(stats.BytesRecv)/1024/1024), 12),
+			truncateCell(fmt.Sprintf("%d", stats.ClientCount), 8),
 			formatUptime(stats.Uptime),
 		})
 	}
@@ -146,10 +145,10 @@ func (m *Model) View() string {
 			{Title: "Status", Width: 10},
 			{Title: "Codec", Width: 8},
 			{Title: "Resolution", Width: 12},
-			{Title: "FPS", Width: 8},
-			{Title: "Clients", Width: 8},
-			{Title: "Bitrate", Width: 12},
-			{Title: "Transferred", Width: 12},
+			{Title: "Framerate", Width: 11},
+			{Title: "Bitrate", Width: 15},
+			{Title: "Bandwidth", Width: 12},
+			{Title: "Clients", Width: 10},
 			{Title: "Uptime", Width: 10},
 		}),
 		table.WithRows(rows),
@@ -159,6 +158,7 @@ func (m *Model) View() string {
 	s := table.DefaultStyles()
 	s.Header = headerStyle
 	s.Cell = lipgloss.NewStyle()
+	s.Selected = lipgloss.Style{}
 	t.SetStyles(s)
 
 	totalPages := (len(m.streams) + m.pageSize - 1) / m.pageSize
@@ -175,7 +175,14 @@ func (m *Model) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		headerStyle.Render("WebTransport RTSP Streams"),
+		whiteStyle.Render("┌────────────────────────────────────────┐"),
+		whiteStyle.Render("│ WebRTP Steamer                         │"),
+		lipgloss.JoinHorizontal(lipgloss.Left,
+			whiteStyle.Render("│"),
+			dimStyle.Render(" © 2026 Connected Tech Co.,Ltd.         "),
+			whiteStyle.Render("│"),
+		),
+		whiteStyle.Render("└────────────────────────────────────────┘"),
 		t.View(),
 		nav,
 		"",
@@ -192,6 +199,13 @@ func formatUptime(d time.Duration) string {
 		return fmt.Sprintf("%.1fm", d.Minutes())
 	}
 	return fmt.Sprintf("%.1fh", d.Hours())
+}
+
+func truncateCell(s string, maxWidth int) string {
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	return strings.TrimRight(s[:maxWidth-2], " ") + "… "
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -272,37 +286,19 @@ func main() {
 		})
 	}
 
-	app.Get("/", func(c fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"streams": func() []fiber.Map {
-				result := make([]fiber.Map, len(streams))
-				for i, s := range streams {
-					stats := s.Hub.GetStats(s.Name)
-					result[i] = fiber.Map{
-						"name":         s.Name,
-						"url":          s.URL,
-						"ready":        stats.Ready,
-						"clients":      stats.ClientCount,
-						"bitrate_kbps": stats.Bitrate,
-						"bytes":        stats.BytesRecv,
-						"uptime":       stats.Uptime.String(),
-					}
-				}
-				return result
-			}(),
-		})
+	app.Get("/info", func(c fiber.Ctx) error {
+		stats := make([]*webrtp.StreamStats, len(streams))
+		for i, s := range streams {
+			streamStats := s.Hub.GetStats(s.Name)
+			streamStats.Name = s.Name
+			stats[i] = &streamStats
+		}
+		return c.JSON(webrtp.Status{Streams: stats})
 	})
 
-	if CLI.Interface && isatty.IsTerminal(os.Stdout.Fd()) {
-		runTUI(ctx, streams)
-	} else {
-		runServer(ctx, streams, app, CLI.Port)
-	}
-}
-
-func runServer(ctx context.Context, streams []*Stream, app *fiber.App, port int) {
+	// Start fiber server
 	go func() {
-		addr := fmt.Sprintf(":%d", port)
+		addr := fmt.Sprintf(":%d", CLI.Port)
 		log.Printf("HTTP server listening on http://localhost%s", addr)
 		log.Printf("Streams available:")
 		for i, s := range streams {
@@ -313,6 +309,14 @@ func runServer(ctx context.Context, streams []*Stream, app *fiber.App, port int)
 		}
 	}()
 
+	if CLI.Interface && isatty.IsTerminal(os.Stdout.Fd()) {
+		runTUI(ctx, streams)
+	} else {
+		runServer(ctx, streams)
+	}
+}
+
+func runServer(ctx context.Context, streams []*Stream) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan

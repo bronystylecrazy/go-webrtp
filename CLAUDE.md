@@ -16,9 +16,12 @@
 ## Code
 
 - Only comment as `// * short lowercase description`, do not add additional comment when editing.
-- Use `r` as receiver name for all struct, e.g., `func (r *Service) UserCreate(...)`
+- Use `r` as pointer receiver name for all struct, e.g., `func (r *Service) UserCreate(...)`
 - For functions naming, use `Entity` + `Action` format, e.g., `UserCreate`, and always be public functions. The sub or
-  helper function must also be public functions with same prefix as the main function, e.g., `UserCreateValidate`.
+  helper function must also be public functions with same prefix as the main function, e.g., `UserCreateValidate`,
+  except for receiver functions name that can use action based on its struct name.
 - Use standard functions as basis, e.g., `url.JoinPath`, `filepath.Join`, `math.Abs`. Do not implement logic yourself.
 - Use camel case for all yaml and json tags.
 - Force declarations to camel or title case regardless of abbreviation, e.g., `AnnexbToAvcc` instead of `AnnexBToAVCC`.
+- Use pointer for any struct, both return value, parameter and array element,
+  e.g., `func(ctx context.Context, req *UserRequest) (*Response)`, `make([]*webrtp.StreamStats, 0)`, `[]*User`, 
