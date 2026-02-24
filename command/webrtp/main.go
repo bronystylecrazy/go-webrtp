@@ -45,7 +45,7 @@ type Stream struct {
 	Handler fiber.Handler
 }
 
-type TUI struct {
+type Model struct {
 	streams  []*Stream
 	page     int
 	pageSize int
@@ -54,7 +54,7 @@ type TUI struct {
 	quitting bool
 }
 
-func (m *TUI) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg{t}
 	})
@@ -62,7 +62,7 @@ func (m *TUI) Init() tea.Cmd {
 
 type tickMsg struct{ time.Time }
 
-func (m *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -97,7 +97,7 @@ var (
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
-func (m *TUI) View() string {
+func (m *Model) View() string {
 	if m.quitting {
 		return "Goodbye!\n"
 	}
@@ -233,7 +233,7 @@ func main() {
 			name = *u.Name
 		}
 		inst := webrtp.Init(&webrtp.Config{
-			RTSP:   u.RtspUrl,
+			Rtsp:   u.RtspUrl,
 			Logger: log.Default(),
 		})
 		streams[i] = &Stream{
@@ -323,7 +323,7 @@ func runServer(ctx context.Context, streams []*Stream, app *fiber.App, port int)
 }
 
 func runTUI(ctx context.Context, streams []*Stream) {
-	m := &TUI{
+	m := &Model{
 		streams:  streams,
 		pageSize: 10,
 		logs:     []string{},
@@ -331,13 +331,13 @@ func runTUI(ctx context.Context, streams []*Stream) {
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	// Create a log writer that sends to TUI
+	// Create a log writer that sends to Model
 	logWriter := &logWriter{logs: &m.logs}
 	log.SetOutput(logWriter)
 	log.SetFlags(0)
 
 	if _, err := p.Run(); err != nil {
-		log.Fatalf("TUI: %v", err)
+		log.Fatalf("Model: %v", err)
 	}
 }
 

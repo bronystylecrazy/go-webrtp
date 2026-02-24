@@ -32,7 +32,7 @@ type rtspHandler struct {
 	mu     sync.Mutex
 }
 
-func (r *rtspHandler) processAU(au [][]byte, ts uint32, isIDR bool) {
+func (r *rtspHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.hub.GetInit() == nil {
@@ -46,14 +46,14 @@ func (r *rtspHandler) processAU(au [][]byte, ts uint32, isIDR bool) {
 	if r.prevTS != 0 && ts > r.prevTS {
 		if d := ts - r.prevTS; d > 0 && d < 90000 {
 			dur = d
-			fps := float64(90000) / float64(dur)
-			if fps > 0 && fps < 120 {
-				r.hub.UpdateFPS(fps)
+			framerate := float64(90000) / float64(dur)
+			if framerate > 0 {
+				r.hub.SetFramerate(framerate)
 			}
 		}
 	}
 	r.prevTS = ts
-	avcc := AnnexBtoAVCC(au)
+	avcc := AnnexbToAvcc(au)
 	r.seqNr++
 	frag, err := BuildFragment(r.seqNr, dts, dur, isIDR, avcc)
 	if err != nil {
@@ -63,8 +63,8 @@ func (r *rtspHandler) processAU(au [][]byte, ts uint32, isIDR bool) {
 	r.hub.Broadcast(frag)
 }
 
-func (r *Instance) connectRTSP(ctx context.Context) (*rtspConn, error) {
-	u, err := parseRTSPURL(r.cfg.RTSP)
+func (r *Instance) connectRtsp(ctx context.Context) (*rtspConn, error) {
+	u, err := parseRtspUrl(r.cfg.Rtsp)
 	if err != nil {
 		return nil, err
 	}

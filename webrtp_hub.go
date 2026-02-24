@@ -35,7 +35,7 @@ func (r *Hub) SetInit(data []byte) {
 	r.ready.Store(true)
 }
 
-func (r *Hub) SetCodecInfo(codec string, width, height int, frameRate float64) {
+func (r *Hub) SetInfo(codec string, width, height int, frameRate float64) {
 	r.mu.Lock()
 	r.codec = codec
 	r.width = width
@@ -44,9 +44,9 @@ func (r *Hub) SetCodecInfo(codec string, width, height int, frameRate float64) {
 	r.mu.Unlock()
 }
 
-func (r *Hub) UpdateFPS(fps float64) {
+func (r *Hub) SetFramerate(framerate float64) {
 	r.mu.Lock()
-	r.frameRate = fps
+	r.frameRate = framerate
 	r.mu.Unlock()
 }
 

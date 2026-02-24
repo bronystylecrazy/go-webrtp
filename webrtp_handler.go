@@ -13,12 +13,12 @@ func (r *Instance) Handler() fiber.Handler {
 			return fiber.ErrUpgradeRequired
 		}
 		return websocket.New(func(conn *websocket.Conn) {
-			r.serveWS(conn)
+			r.HandleWebsocket(conn)
 		})(c)
 	}
 }
 
-func (r *Instance) serveWS(conn *websocket.Conn) {
+func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 	defer conn.Close()
 	r.logger.Printf("client connected: %s", conn.RemoteAddr())
 
@@ -27,7 +27,7 @@ func (r *Instance) serveWS(conn *websocket.Conn) {
 		r.logger.Printf("stream not ready, closing %s", conn.RemoteAddr())
 		return
 	}
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteMessage(websocket.BinaryMessage, initData); err != nil {
 		return
 	}
@@ -39,7 +39,7 @@ func (r *Instance) serveWS(conn *websocket.Conn) {
 	}()
 
 	for frag := range ch {
-		conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
+		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
 		if err := conn.WriteMessage(websocket.BinaryMessage, frag); err != nil {
 			return
 		}

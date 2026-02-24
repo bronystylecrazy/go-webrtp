@@ -6,7 +6,17 @@ import (
 	"fmt"
 
 	"github.com/Eyevinn/mp4ff/mp4"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
 )
+
+// parseRtspUrl validates and parses the RTSP URL.
+func parseRtspUrl(rtspURL string) (*base.URL, error) {
+	u, err := base.ParseURL(rtspURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid RTSP URL: %w", err)
+	}
+	return u, nil
+}
 
 // BuildInitH264 creates an fMP4 init segment for H264 video.
 func BuildInitH264(sps, pps []byte) ([]byte, error) {
@@ -36,8 +46,8 @@ func BuildInitH265(vps, sps, pps []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// AnnexBtoAVCC converts Annex-B NAL units to AVCC format.
-func AnnexBtoAVCC(au [][]byte) []byte {
+// AnnexbToAvcc converts Annex-B NAL units to AVCC format.
+func AnnexbToAvcc(au [][]byte) []byte {
 	var buf bytes.Buffer
 	for _, nalu := range au {
 		ln := make([]byte, 4)

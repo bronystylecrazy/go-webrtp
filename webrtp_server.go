@@ -11,7 +11,7 @@ func (r *Instance) Start(addr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
-	conn, err := r.connectRTSP(ctx)
+	conn, err := r.connectRtsp(ctx)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("rtsp connect: %w", err)
@@ -29,7 +29,7 @@ func (r *Instance) Connect() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
-	conn, err := r.connectRTSP(ctx)
+	conn, err := r.connectRtsp(ctx)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("rtsp connect: %w", err)

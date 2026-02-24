@@ -21,3 +21,4 @@
   helper function must also be public functions with same prefix as the main function, e.g., `UserCreateValidate`.
 - Use standard functions as basis, e.g., `url.JoinPath`, `filepath.Join`, `math.Abs`. Do not implement logic yourself.
 - Use camel case for all yaml and json tags.
+- Force declarations to camel or title case regardless of abbreviation, e.g., `AnnexbToAvcc` instead of `AnnexBToAVCC`.

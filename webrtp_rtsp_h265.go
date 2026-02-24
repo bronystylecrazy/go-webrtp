@@ -60,8 +60,8 @@ func (r *Instance) handleH265Packet(pkt *rtp.Packet, rtpDec *rtph265.Decoder, f 
 			height = spsInfo.Height()
 		}
 
-		r.hub.SetCodecInfo("H265", width, height, 0)
+		r.hub.SetInfo("H265", width, height, 0)
 		r.logger.Printf("H265 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
 	}
-	h.processAU(au, pkt.Timestamp, isIDR)
+	h.processAu(au, pkt.Timestamp, isIDR)
 }

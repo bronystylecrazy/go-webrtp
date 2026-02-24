@@ -72,8 +72,8 @@ func (r *Instance) handleH264Packet(pkt *rtp.Packet, rtpDec *rtph264.Decoder, f 
 			height = spsInfo.Height()
 		}
 
-		r.hub.SetCodecInfo("H264", width, height, 0)
+		r.hub.SetInfo("H264", width, height, 0)
 		r.logger.Printf("H264 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
 	}
-	h.processAU(au, pkt.Timestamp, isIDR)
+	h.processAu(au, pkt.Timestamp, isIDR)
 }

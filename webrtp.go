@@ -8,7 +8,7 @@ import (
 )
 
 type Config struct {
-	RTSP            string
+	Rtsp            string
 	Logger          *log.Logger
 	WriteTimeout    time.Duration
 	ReadBufferSize  int
@@ -42,7 +42,7 @@ func Init(cfg *Config) *Instance {
 	}
 	return &Instance{
 		cfg: &Config{
-			RTSP:            cfg.RTSP,
+			Rtsp:            cfg.Rtsp,
 			Logger:          logger,
 			WriteTimeout:    writeTimeout,
 			ReadBufferSize:  readBuf,
