@@ -61,6 +61,47 @@ Run the server:
 - Stream by name: `ws://localhost:8080/stream/camera1`
 - Stream by number: `ws://localhost:8080/stream/no/0`
 
+### Embedded Server
+
+You can embed the WebRTP handler in your own Fiber application:
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/connectedtechco/go-webrtp"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+)
+
+func main() {
+	// Initialize WebRTP instance
+	inst := webrtp.Init(&webrtp.Config{
+		Rtsp:   "rtsp://192.168.1.100:554/stream",
+		Logger: log.Default(),
+	})
+
+	// Connect to RTSP source
+	if err := inst.Connect(); err != nil {
+		log.Fatalf("connect: %v", err)
+	}
+
+	// Create Fiber app
+	app := fiber.New()
+	app.Use(cors.New())
+
+	// Register WebRTP handler at /stream endpoint
+	app.All("/stream", inst.Handler())
+
+	// Start server
+	log.Printf("Server started on :8080")
+	log.Fatal(app.Listen(":8080"))
+}
+```
+
 ## Libraries
 
 ### JavaScript / TypeScript
