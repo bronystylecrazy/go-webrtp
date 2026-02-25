@@ -7,9 +7,14 @@ import (
 	"time"
 )
 
+type Logger interface {
+	Print(v ...interface{})
+	Printf(format string, v ...interface{})
+}
+
 type Config struct {
 	Rtsp            string
-	Logger          *log.Logger
+	Logger          Logger
 	WriteTimeout    time.Duration
 	ReadBufferSize  int
 	WriteBufferSize int
@@ -18,15 +23,20 @@ type Config struct {
 type Instance struct {
 	cfg    *Config
 	hub    *Hub
-	logger *log.Logger
+	logger Logger
 	conn   *rtspConn
 	cancel context.CancelFunc
 }
 
+type stdLogger struct{}
+
+func (s stdLogger) Print(v ...interface{})                 { log.Print(v...) }
+func (s stdLogger) Printf(format string, v ...interface{}) { log.Printf(format, v...) }
+
 func Init(cfg *Config) *Instance {
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.Default()
+		logger = stdLogger{}
 	}
 	writeTimeout := cfg.WriteTimeout
 	if writeTimeout == 0 {

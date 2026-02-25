@@ -258,9 +258,11 @@ func main() {
 		if u.Name != nil && *u.Name != "" {
 			name = *u.Name
 		}
+		prefix := fmt.Sprintf("[#%d: %s]", i, name)
+		logger := NewLogger(prefix, log.Default())
 		inst := webrtp.Init(&webrtp.Config{
 			Rtsp:   u.RtspUrl,
-			Logger: log.Default(),
+			Logger: logger,
 		})
 		streams[i] = &Stream{
 			Name:    name,

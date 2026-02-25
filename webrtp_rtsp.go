@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -26,7 +25,7 @@ func (r *rtspConn) Close() {
 
 type rtspHandler struct {
 	hub    *Hub
-	logger *log.Logger
+	logger Logger
 	seqNr  uint32
 	prevTS uint32
 	tsOff  uint64
