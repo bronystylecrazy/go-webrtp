@@ -33,16 +33,6 @@ Download the latest release binary from [GitHub Releases](https://github.com/con
 
 ### Run Server
 
-Create a `config.yml` file:
-
-```yaml
-upstreams:
-  - name: camera1
-    rtspUrl: rtsp://192.168.1.100:554/stream
-```
-
-Run the server:
-
 ```bash
 ./webrtp -c config.yml
 ```
@@ -55,11 +45,33 @@ Run the server:
   -p, --port int        HTTP server port (default: 8080)
 ```
 
-### Access Streams
+### Configuration
+
+Create a `config.yml` file:
+
+```yaml
+telemetryServiceName: streamer1     # Optional: OTEL service name (default: "webrtp")
+telemetryEndpoint: "localhost:4317" # Optional: OTEL gRPC endpoint for pushing metrics
+upstreams:
+  - name: camera1
+    rtspUrl: rtsp://192.168.1.100:554/stream
+```
+
+### Endpoint
 
 - Web UI: http://localhost:8080/
 - Stream by name: `ws://localhost:8080/stream/camera1`
 - Stream by number: `ws://localhost:8080/stream/no/0`
+- Metrics: http://localhost:8080/metrics
+- Stream Information: http://localhost:8080/info
+
+### Telemetry
+
+Metrics are available at `/metrics` endpoint in Prometheus format:
+
+- `streamer_clients{name="camera1"}` - Current number of clients
+- `streamer_bitrate_kbps{name="camera1"}` - Current bitrate in Kbps
+- `streamer_framerate{name="camera1"}` - Current framerate
 
 ### Embedded Server
 
