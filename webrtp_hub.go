@@ -12,9 +12,8 @@ type Hub struct {
 	clients       map[chan []byte]struct{}
 	init          []byte
 	bytesTotal    atomic.Uint64
-	bytesCurrent  atomic.Uint64
-	framesCurrent atomic.Uint64
-	cycleAt       atomic.Pointer[time.Time]
+	bytesBuckets  *[2]*atomic.Uint64
+	framesBuckets *[2]*atomic.Uint64
 	frameNo       atomic.Uint64
 	clientCount   atomic.Int32
 	ready         atomic.Bool
@@ -24,12 +23,19 @@ type Hub struct {
 	width         int
 	height        int
 	frameRate     float64
+	lastCycleIdx  int
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		clients: make(map[chan []byte]struct{}),
+		bytesBuckets:  &[2]*atomic.Uint64{new(atomic.Uint64), new(atomic.Uint64)},
+		framesBuckets: &[2]*atomic.Uint64{new(atomic.Uint64), new(atomic.Uint64)},
+		clients:       make(map[chan []byte]struct{}),
 	}
+}
+
+func (r *Hub) cycleIdx() int {
+	return int(time.Now().Unix() % 2)
 }
 
 func (r *Hub) SetInit(data []byte) {
@@ -46,9 +52,10 @@ func (r *Hub) Reset() {
 	r.ready.Store(false)
 	r.readyAt.Store(nil)
 	r.lastPacketAt.Store(nil)
-	r.bytesCurrent.Store(0)
-	r.framesCurrent.Store(0)
-	r.cycleAt.Store(nil)
+	r.bytesBuckets[0].Store(0)
+	r.bytesBuckets[1].Store(0)
+	r.framesBuckets[0].Store(0)
+	r.framesBuckets[1].Store(0)
 	r.mu.Lock()
 	r.init = nil
 	r.mu.Unlock()
@@ -105,18 +112,20 @@ func (r *Hub) Broadcast(data []byte) {
 	size := uint64(len(data))
 	r.bytesTotal.Add(size)
 
-	// Start new 1-second window if needed or if previous window expired
-	cycleAt := r.cycleAt.Load()
-	if cycleAt == nil || time.Since(*cycleAt) >= time.Second {
-		r.bytesCurrent.Store(0)
-		r.framesCurrent.Store(0)
-		now := time.Now()
-		r.cycleAt.Store(&now)
-	}
-	r.bytesCurrent.Add(size)
-	r.framesCurrent.Add(1)
-
+	// Use current second to determine bucket
 	now := time.Now()
+	idx := int(now.Unix() % 2)
+
+	// If switched to new second, start fresh
+	if idx != r.lastCycleIdx {
+		r.bytesBuckets[idx].Store(0)
+		r.framesBuckets[idx].Store(0)
+		r.lastCycleIdx = idx
+	}
+
+	r.bytesBuckets[idx].Add(size)
+	r.framesBuckets[idx].Add(1)
+
 	r.lastPacketAt.Store(&now)
 
 	frameData := make([]byte, 8+len(data))
@@ -161,8 +170,10 @@ func (r *Hub) GetStats(name string) StreamStats {
 	readyAt := r.readyAt.Load()
 	lastPacketAt := r.lastPacketAt.Load()
 
-	bytesCurrent := r.bytesCurrent.Load()
-	framesCurrent := r.framesCurrent.Load()
+	// Read from other bucket (previous complete second)
+	idx := (r.cycleIdx() + 1) % 2
+	bytesCurrent := r.bytesBuckets[idx].Load()
+	framesCurrent := r.framesBuckets[idx].Load()
 
 	var elapsed time.Duration
 	var bitrate float64
@@ -171,14 +182,8 @@ func (r *Hub) GetStats(name string) StreamStats {
 		elapsed = time.Since(*readyAt)
 	}
 	if lastPacketAt != nil && bytesCurrent > 0 {
-		cycleAt := r.cycleAt.Load()
-		if cycleAt != nil {
-			passed := time.Since(*cycleAt).Seconds()
-			if passed > 0 {
-				bitrate = float64(bytesCurrent) * 8 / passed / 1000
-				frameRate = float64(framesCurrent) / passed
-			}
-		}
+		bitrate = float64(bytesCurrent) * 8 / 1000
+		frameRate = float64(framesCurrent)
 	}
 	r.mu.RLock()
 	codec := r.codec
