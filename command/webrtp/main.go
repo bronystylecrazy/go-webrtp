@@ -38,6 +38,7 @@ var CLI struct {
 
 type Config struct {
 	TelemetryServiceName *string     `yaml:"telemetryServiceName"`
+	TelemetryEndpoint    *string     `yaml:"telemetryEndpoint"`
 	Upstreams            []*Upstream `yaml:"upstreams"`
 }
 
@@ -327,7 +328,11 @@ func main() {
 	if cfg.TelemetryServiceName != nil && *cfg.TelemetryServiceName != "" {
 		serviceName = *cfg.TelemetryServiceName
 	}
-	if err := MetricsInit(serviceName); err != nil {
+	endpoint := ""
+	if cfg.TelemetryEndpoint != nil && *cfg.TelemetryEndpoint != "" {
+		endpoint = *cfg.TelemetryEndpoint
+	}
+	if err := MetricsInit(serviceName, endpoint); err != nil {
 		log.Printf("metrics init: %v", err)
 	} else {
 		MetricsRoute(app)
