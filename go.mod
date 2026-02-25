@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/gofiber/contrib/v3/websocket v1.0.0
 	github.com/gofiber/fiber/v3 v3.0.0
 	github.com/gorilla/websocket v1.5.3

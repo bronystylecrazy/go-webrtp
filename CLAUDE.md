@@ -24,4 +24,6 @@
 - Use camel case for all yaml and json tags.
 - Force declarations to camel or title case regardless of abbreviation, e.g., `AnnexbToAvcc` instead of `AnnexBToAVCC`.
 - Use pointer for any struct, both return value, parameter and array element,
-  e.g., `func(ctx context.Context, req *UserRequest) (*Response)`, `make([]*webrtp.StreamStats, 0)`, `[]*User`, 
+  e.g., `func(ctx context.Context, req *UserRequest) (*Response)`, `make([]*webrtp.StreamStats, 0)`, `[]*User`.
+- Use external libraries for any non-trivial logic, e.g., `go-humanize` for file size, try not to implement the logic
+  yourself, and do not copy and paste the code from other places, but use the library instead.

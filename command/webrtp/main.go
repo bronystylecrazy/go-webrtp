@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/connectedtechco/go-webrtp"
+	"github.com/dustin/go-humanize"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/mattn/go-isatty"
@@ -138,9 +139,10 @@ func (m *Model) View() string {
 			truncateCell(stats.Codec, 8),
 			truncateCell(fmt.Sprintf("%dx%d", stats.Width, stats.Height), 12),
 			truncateCell(fmt.Sprintf("%.1f", stats.Framerate), 11),
-			truncateCell(fmt.Sprintf("%.1f kbps", stats.Bitrate), 15),
-			truncateCell(fmt.Sprintf("%.2f MB", float64(stats.BytesRecv)/1024/1024), 12),
-			truncateCell(fmt.Sprintf("%d", stats.ClientCount), 8),
+			truncateCell(fmt.Sprintf("%.1f kbps", stats.Bitrate), 14),
+			truncateCell(humanize.Bytes(stats.BytesRecv), 12),
+			truncateCell(fmt.Sprintf("%d", stats.FrameNo), 11),
+			truncateCell(fmt.Sprintf("%d", stats.ClientCount), 9),
 			formatUptime(stats.Uptime),
 		})
 	}
@@ -153,9 +155,10 @@ func (m *Model) View() string {
 			{Title: "Codec", Width: 8},
 			{Title: "Resolution", Width: 12},
 			{Title: "Framerate", Width: 11},
-			{Title: "Bitrate", Width: 15},
+			{Title: "Bitrate", Width: 14},
 			{Title: "Bandwidth", Width: 12},
-			{Title: "Clients", Width: 10},
+			{Title: "Frames", Width: 11},
+			{Title: "Clients", Width: 9},
 			{Title: "Uptime", Width: 10},
 		}),
 		table.WithRows(rows),
@@ -199,13 +202,15 @@ func (m *Model) View() string {
 }
 
 func formatUptime(d time.Duration) string {
-	if d < time.Minute {
-		return d.Round(time.Second).String()
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd %02d:%02d:%02d", days, hours, minutes, seconds)
 	}
-	if d < time.Hour {
-		return fmt.Sprintf("%.1fm", d.Minutes())
-	}
-	return fmt.Sprintf("%.1fh", d.Hours())
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
 func truncateCell(s string, maxWidth int) string {
