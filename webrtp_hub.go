@@ -7,9 +7,14 @@ import (
 	"time"
 )
 
+type Frame struct {
+	Data  []byte
+	IsKey bool
+}
+
 type Hub struct {
 	mu            sync.RWMutex
-	clients       map[chan []byte]struct{}
+	clients       map[chan *Frame]struct{}
 	init          []byte
 	bytesTotal    atomic.Uint64
 	bytesBuckets  [2]*atomic.Uint64
@@ -30,7 +35,7 @@ func NewHub() *Hub {
 	return &Hub{
 		bytesBuckets:  [2]*atomic.Uint64{new(atomic.Uint64), new(atomic.Uint64)},
 		framesBuckets: [2]*atomic.Uint64{new(atomic.Uint64), new(atomic.Uint64)},
-		clients:       make(map[chan []byte]struct{}),
+		clients:       make(map[chan *Frame]struct{}),
 	}
 }
 
@@ -90,8 +95,8 @@ func (r *Hub) GetInit() []byte {
 	return r.init
 }
 
-func (r *Hub) Subscribe() chan []byte {
-	ch := make(chan []byte, 1)
+func (r *Hub) Subscribe() chan *Frame {
+	ch := make(chan *Frame, 2)
 	r.mu.Lock()
 	r.clients[ch] = struct{}{}
 	r.mu.Unlock()
@@ -99,7 +104,7 @@ func (r *Hub) Subscribe() chan []byte {
 	return ch
 }
 
-func (r *Hub) Unsubscribe(ch chan []byte) {
+func (r *Hub) Unsubscribe(ch chan *Frame) {
 	r.mu.Lock()
 	delete(r.clients, ch)
 	close(ch)
@@ -107,7 +112,7 @@ func (r *Hub) Unsubscribe(ch chan []byte) {
 	r.clientCount.Add(-1)
 }
 
-func (r *Hub) Broadcast(data []byte) {
+func (r *Hub) Broadcast(data []byte, isKey bool) {
 	frameNo := r.frameNo.Add(1)
 	size := uint64(len(data))
 	r.bytesTotal.Add(size)
@@ -131,17 +136,25 @@ func (r *Hub) Broadcast(data []byte) {
 	frameData := make([]byte, 8+len(data))
 	binary.BigEndian.PutUint64(frameData[:8], frameNo)
 	copy(frameData[8:], data)
+	frame := &Frame{
+		Data:  frameData,
+		IsKey: isKey,
+	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for ch := range r.clients {
 		select {
-		case <-ch:
+		case ch <- frame:
 		default:
-		}
-		select {
-		case ch <- frameData:
-		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- frame:
+			default:
+			}
 		}
 	}
 }

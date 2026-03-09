@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type Config struct {
 	Device          string
 	Codec           string
 	FrameRate       float64
+	BitrateKbps     int
 	Logger          Logger
 	WriteTimeout    time.Duration
 	ReadBufferSize  int
@@ -31,6 +33,7 @@ type Instance struct {
 	logger Logger
 	conn   sourceConn
 	cancel context.CancelFunc
+	stop   atomic.Bool
 }
 
 type stdLogger struct{}
@@ -66,6 +69,7 @@ func Init(cfg *Config) *Instance {
 			Device:          cfg.Device,
 			Codec:           strings.ToLower(strings.TrimSpace(cfg.Codec)),
 			FrameRate:       cfg.FrameRate,
+			BitrateKbps:     cfg.BitrateKbps,
 			Logger:          logger,
 			WriteTimeout:    writeTimeout,
 			ReadBufferSize:  readBuf,

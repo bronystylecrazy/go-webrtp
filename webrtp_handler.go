@@ -56,9 +56,28 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 	}()
 
-	for frag := range ch {
+	for frame := range ch {
+		if frame == nil {
+			continue
+		}
+		selected := frame
+		for {
+			select {
+			case next, ok := <-ch:
+				if !ok {
+					return
+				}
+				if next == nil {
+					continue
+				}
+				selected = next
+			default:
+				goto writeFrame
+			}
+		}
+	writeFrame:
 		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
-		if err := conn.WriteMessage(websocket.BinaryMessage, frag); err != nil {
+		if err := conn.WriteMessage(websocket.BinaryMessage, selected.Data); err != nil {
 			return
 		}
 	}

@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTP Stream</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0b1220;
+            --panel: rgba(15, 23, 42, 0.9);
+            --line: rgba(148, 163, 184, 0.24);
+            --text: #e5eefb;
+            --muted: #93a4bf;
+            --accent: #38bdf8;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 38%),
+                linear-gradient(180deg, #0f172a, #020617);
+            color: var(--text);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            overflow: hidden;
+        }
+
+        .page {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .header {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            z-index: 2;
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: center;
+            padding: 16px 18px;
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: rgba(15, 23, 42, 0.78);
+            backdrop-filter: blur(16px);
+        }
+
+        .title {
+            margin: 0;
+            font-size: clamp(1.1rem, 2vw, 1.5rem);
+        }
+
+        .meta {
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        .viewer {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+
+        .viewer video {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: contain;
+            background: #000;
+            transition: opacity 160ms ease;
+        }
+
+        .viewer video.is-hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .status {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        .status strong {
+            color: var(--accent);
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        .quality-select {
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(2, 6, 23, 0.72);
+            color: var(--text);
+            padding: 8px 14px;
+            font: inherit;
+        }
+
+        @media (max-width: 900px) {
+            .header {
+                top: 12px;
+                left: 12px;
+                right: 12px;
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <section class="header">
+        <div>
+            <h1 class="title" id="stream-title">Loading stream...</h1>
+            <div class="meta" id="stream-meta">Resolving stream details</div>
+        </div>
+        <div class="status" id="stream-status">
+            <span><strong id="codec">-</strong> codec</span>
+            <span><strong id="resolution">-</strong> resolution</span>
+            <span><strong id="framerate">-</strong> fps</span>
+            <span><strong id="bitrate">-</strong> kbps</span>
+            <span><strong id="quality">default</strong> quality</span>
+            <span><strong id="bytes">-</strong> rx/s</span>
+            <span><strong id="frame-no">0</strong> frame</span>
+        </div>
+        <label class="controls">
+            <span>Quality</span>
+            <select id="quality-select" class="quality-select">
+                <option value="">Default</option>
+            </select>
+        </label>
+    </section>
+
+    <section class="viewer">
+        <video id="stream-video-a" autoplay playsinline muted controls></video>
+        <video id="stream-video-b" autoplay playsinline muted controls class="is-hidden"></video>
+    </section>
+</main>
+
+<script>
+    class StreamPlayer {
+        constructor(wsUrl) {
+            this.wsUrl = wsUrl;
+            this.ws = null;
+            this.canvas = null;
+            this.ctx = null;
+            this.decoder = null;
+            this.frameIndex = 0;
+            this.initDone = false;
+            this.codec = null;
+            this.desc = null;
+            this.firstFrame = true;
+            this.dropped = 0;
+            this._oninfo = null;
+            this._paused = false;
+            this._videoEl = null;
+            this._closed = false;
+            this._reconnectTimer = null;
+            this._reconnectDelay = 1000;
+            this._pendingDecode = 0;
+            this._waitingForKeyframe = false;
+            this._maxPendingDecode = 8;
+            this._lateFrameThreshold = 16;
+            this._onready = null;
+            this._didRenderFrame = false;
+
+            this.connect();
+        }
+
+        connect() {
+            if (this._closed) return;
+            this.ws = new WebSocket(this.wsUrl);
+            this.ws.binaryType = 'arraybuffer';
+            this.ws.onopen = () => {
+                this._reconnectDelay = 1000;
+            };
+            this.ws.onmessage = (e) => this.onMessage(e);
+            this.ws.onclose = () => this.scheduleReconnect();
+            this.ws.onerror = () => {
+                if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+                    this.ws.close();
+                }
+            };
+        }
+
+        resetStreamState() {
+            this.initDone = false;
+            this.codec = null;
+            this.desc = null;
+            this.firstFrame = true;
+            this.frameIndex = 0;
+            this._didRenderFrame = false;
+            this._pendingDecode = 0;
+            this._waitingForKeyframe = false;
+            if (this.decoder && this.decoder.state !== 'closed') {
+                try { this.decoder.close(); } catch (_) {}
+            }
+            this.decoder = null;
+        }
+
+        scheduleReconnect() {
+            if (this._closed) return;
+            this.resetStreamState();
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = setTimeout(() => {
+                this.connect();
+            }, this._reconnectDelay);
+            this._reconnectDelay = Math.min(this._reconnectDelay * 2, 5000);
+        }
+
+        onMessage(e) {
+            if (this._paused) return;
+
+            if (!this.initDone) {
+                this.initDone = true;
+                const parsed = this.parseInit(e.data);
+                this.codec = parsed.codec;
+                this.desc = parsed.description;
+                this.makeDecoder(this.codec, this.desc);
+                if (this._oninfo) this._oninfo({codec: this.codec});
+                return;
+            }
+
+            if (!this.decoder || this.decoder.state !== 'configured') return;
+
+            const {frameNo, payload, isKey} = this.parseFrag(e.data);
+            const decodeQueue = Math.max(this.decoder.decodeQueueSize || 0, this._pendingDecode);
+
+            if (this._waitingForKeyframe && !isKey) {
+                this.dropped++;
+                return;
+            }
+
+            if (decodeQueue >= this._lateFrameThreshold && !isKey) {
+                this.dropped++;
+                this._waitingForKeyframe = true;
+                return;
+            }
+
+            if (decodeQueue >= this._maxPendingDecode && !isKey) {
+                this.dropped++;
+                return;
+            }
+
+            const ts = (++this.frameIndex) * 100_000;
+
+            try {
+                this._pendingDecode++;
+                this.decoder.decode(new EncodedVideoChunk({
+                    type: isKey ? 'key' : 'delta',
+                    timestamp: ts,
+                    data: payload
+                }));
+                if (isKey) {
+                    this._waitingForKeyframe = false;
+                }
+                if (this._oninfo) this._oninfo({frameNo});
+            } catch (_) {
+                this.dropped++;
+                this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                if (this.decoder.state !== 'configured') {
+                    this.makeDecoder(this.codec, this.desc);
+                }
+            }
+        }
+
+        parseInit(buf) {
+            const b = new Uint8Array(buf);
+            for (let i = 0; i < b.length - 8; i++) {
+                if (b[i] === 0x61 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
+                    const payStart = i + 4;
+                    const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
+                    const payLen = boxSize - 8;
+                    const profile = b[payStart + 1].toString(16).padStart(2, '0');
+                    const compat = b[payStart + 2].toString(16).padStart(2, '0');
+                    const level = b[payStart + 3].toString(16).padStart(2, '0');
+                    return {
+                        codec: 'avc1.' + profile + compat + level,
+                        description: buf.slice(payStart, payStart + payLen)
+                    };
+                }
+                if (b[i] === 0x68 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
+                    const payStart = i + 4;
+                    const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
+                    const generalProfile = b[payStart + 1];
+                    const generalTierFlag = (b[payStart + 2] >> 7) & 1;
+                    const generalLevel = b[payStart + 6];
+                    const codecStr = `hvc1.${generalProfile}.${generalLevel}.${generalTierFlag === 0 ? 'L' : 'H'}`;
+                    return {codec: codecStr, description: buf.slice(payStart, payStart + boxSize - 8)};
+                }
+            }
+            return {codec: 'avc1.640028', description: null};
+        }
+
+        parseFrag(buf) {
+            const b = new Uint8Array(buf);
+            const frameNo = Number(new DataView(buf).getBigUint64(0));
+            const data = buf.slice(8);
+
+            for (let i = 0; i < b.length - 16; i++) {
+                if (b[i + 12] === 0x6D && b[i + 13] === 0x64 && b[i + 14] === 0x61 && b[i + 15] === 0x74) {
+                    const size = ((b[i + 8] << 24) | (b[i + 9] << 16) | (b[i + 10] << 8) | b[i + 11]) >>> 0;
+                    const payload = data.slice(i + 8, i + size);
+                    const p = new Uint8Array(payload);
+                    let isKey = false;
+                    let pos = 0;
+                    while (pos + 4 < p.length) {
+                        const nl = ((p[pos] << 24) | (p[pos + 1] << 16) | (p[pos + 2] << 8) | p[pos + 3]) >>> 0;
+                        if (nl === 0 || pos + 4 + nl > p.length) break;
+                        const t = p[pos + 4] & 0x1F;
+                        if (t === 5 || t === 19) {
+                            isKey = true;
+                            break;
+                        }
+                        pos += 4 + nl;
+                    }
+                    return {frameNo, payload, isKey};
+                }
+            }
+            return {frameNo, payload: data, isKey: false};
+        }
+
+        makeDecoder(codec, description) {
+            if (this.decoder && this.decoder.state !== 'closed') {
+                try { this.decoder.close(); } catch (_) {}
+            }
+            this.decoder = new VideoDecoder({
+                output: (frame) => {
+                    this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                    const w = frame.displayWidth;
+                    const h = frame.displayHeight;
+                    if (this.canvas.width !== w || this.canvas.height !== h) {
+                        this.canvas.width = w;
+                        this.canvas.height = h;
+                    }
+                    this.ctx.drawImage(frame, 0, 0, w, h);
+                    if (!this._didRenderFrame) {
+                        this._didRenderFrame = true;
+                        if (this._onready) this._onready();
+                    }
+                    frame.close();
+                },
+                error: () => {
+                    this.dropped++;
+                    this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                    this._waitingForKeyframe = true;
+                }
+            });
+            const cfg = {codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware'};
+            if (description) cfg.description = description;
+            this.decoder.configure(cfg);
+        }
+
+        render(video) {
+            this._videoEl = video;
+            this.canvas = document.createElement('canvas');
+            this.ctx = this.canvas.getContext('2d', {alpha: false});
+            this._videoEl.srcObject = this.canvas.captureStream();
+            return this;
+        }
+
+        onInfo(fn) {
+            this._oninfo = fn;
+        }
+
+        onReady(fn) {
+            this._onready = fn;
+        }
+
+        close() {
+            this._closed = true;
+            this._paused = true;
+            clearTimeout(this._reconnectTimer);
+            this.resetStreamState();
+            if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+                this.ws.close();
+            }
+        }
+    }
+
+    function formatBytes(bytes) {
+        const value = Number(bytes || 0);
+        if (value < 1024) return `${value} B`;
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let size = value / 1024;
+        let unit = units[0];
+        for (let i = 1; i < units.length && size >= 1024; i++) {
+            size /= 1024;
+            unit = units[i];
+        }
+        return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
+    }
+
+    function formatRateFromKbps(kbps) {
+        const bytesPerSecond = (Number(kbps || 0) * 1000) / 8;
+        return `${formatBytes(bytesPerSecond)}/s`;
+    }
+
+    function findStream(message, name) {
+        return (message.streams || []).find((stream) => stream.name === name) || null;
+    }
+
+    function qualitySignature(stream) {
+        return (stream.renditions || [])
+            .map((rendition) => `${rendition.name}:${Math.round(rendition.bitrateKbps || 0)}`)
+            .join('|');
+    }
+
+    function applyQualityOptions(stream, requestedQuality) {
+        const select = document.getElementById('quality-select');
+        const nextSignature = qualitySignature(stream);
+        if (select.dataset.signature === nextSignature) {
+            if ((stream.renditions || []).some((item) => item.name === requestedQuality)) {
+                select.value = requestedQuality;
+            } else if (!requestedQuality) {
+                select.value = '';
+            }
+            return;
+        }
+        const current = select.value;
+        const options = ['<option value="">Default</option>'];
+        for (const rendition of (stream.renditions || [])) {
+            options.push(`<option value="${rendition.name}">${rendition.name} (${Math.round(rendition.bitrateKbps || 0)} kbps)</option>`);
+        }
+        select.innerHTML = options.join('');
+        select.dataset.signature = nextSignature;
+        if ((stream.renditions || []).some((item) => item.name === requestedQuality)) {
+            select.value = requestedQuality;
+        } else if (current && (stream.renditions || []).some((item) => item.name === current)) {
+            select.value = current;
+        } else {
+            select.value = '';
+        }
+    }
+
+    function selectedQuality(stream, requestedQuality) {
+        const renditions = stream.renditions || [];
+        if (!requestedQuality || renditions.length === 0) {
+            return stream.activeRendition || 'default';
+        }
+        const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
+        if (match) return match.name;
+        return stream.activeRendition || requestedQuality;
+    }
+
+    function selectedBitrate(stream, requestedQuality) {
+        const renditions = stream.renditions || [];
+        if (requestedQuality && renditions.length > 0) {
+            const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
+            if (match?.stats?.bitrateKbps) return match.stats.bitrateKbps;
+            if (match && match.bitrateKbps) return match.bitrateKbps;
+        }
+        return stream.stats.bitrateKbps || stream.bitrateKbps || 0;
+    }
+
+    function applyStream(stream, requestedQuality) {
+        document.getElementById('stream-title').textContent = stream.name;
+        document.getElementById('stream-meta').textContent = `${stream.sourceType.toUpperCase()} · ${stream.url}`;
+        document.getElementById('codec').textContent = stream.stats.codec || stream.codec || '-';
+        document.getElementById('resolution').textContent = `${stream.stats.width || 0}x${stream.stats.height || 0}`;
+        const liveBitrateKbps = selectedBitrate(stream, requestedQuality);
+        document.getElementById('framerate').textContent = Math.round(stream.stats.framerate || 0);
+        document.getElementById('bitrate').textContent = Math.round(liveBitrateKbps);
+        document.getElementById('quality').textContent = selectedQuality(stream, requestedQuality);
+        document.getElementById('bytes').textContent = formatRateFromKbps(liveBitrateKbps);
+    }
+
+    async function main() {
+        const name = decodeURIComponent(location.pathname.split('/').pop() || '');
+        let activeQuality = new URLSearchParams(location.search).get('quality') || '';
+        let pendingQuality = '';
+        const titleEl = document.getElementById('stream-title');
+        const metaEl = document.getElementById('stream-meta');
+        const qualitySelect = document.getElementById('quality-select');
+        const videoA = document.getElementById('stream-video-a');
+        const videoB = document.getElementById('stream-video-b');
+
+        const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+        const streamWsUrl = (quality) => {
+            const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
+            return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
+        };
+        const bindInfo = (player) => player.onInfo((info) => {
+            if (info.codec) document.getElementById('codec').textContent = info.codec;
+            if (info.frameNo !== undefined) document.getElementById('frame-no').textContent = info.frameNo;
+        });
+        const showVideo = (video) => {
+            videoA.classList.toggle('is-hidden', video !== videoA);
+            videoB.classList.toggle('is-hidden', video !== videoB);
+        };
+        let activeVideo = videoA;
+        let standbyVideo = videoB;
+        let activePlayer = new StreamPlayer(streamWsUrl(activeQuality));
+        activePlayer.render(activeVideo);
+        bindInfo(activePlayer);
+        let pendingPlayer = null;
+        let pendingSwapTimer = null;
+        let swapToken = 0;
+        const setUrlQuality = (quality) => {
+            const url = new URL(location.href);
+            if (quality) {
+                url.searchParams.set('quality', quality);
+            } else {
+                url.searchParams.delete('quality');
+            }
+            history.replaceState(null, '', url);
+        };
+        const swapQuality = (nextQuality) => {
+            swapToken++;
+            const token = swapToken;
+            const nextVideo = standbyVideo;
+            const nextPlayer = new StreamPlayer(streamWsUrl(nextQuality));
+            nextPlayer.render(nextVideo);
+            bindInfo(nextPlayer);
+            nextPlayer.onReady(() => {
+                if (token !== swapToken) {
+                    nextPlayer.close();
+                    return;
+                }
+                const oldPlayer = activePlayer;
+                activeQuality = nextQuality;
+                pendingQuality = '';
+                activePlayer = nextPlayer;
+                pendingPlayer = null;
+                clearTimeout(pendingSwapTimer);
+                pendingSwapTimer = null;
+                showVideo(nextVideo);
+                standbyVideo = activeVideo;
+                activeVideo = nextVideo;
+                qualitySelect.disabled = false;
+                qualitySelect.value = activeQuality;
+                setUrlQuality(activeQuality);
+                setTimeout(() => oldPlayer.close(), 120);
+            });
+            if (pendingPlayer) {
+                pendingPlayer.close();
+            }
+            pendingPlayer = nextPlayer;
+            qualitySelect.disabled = true;
+            clearTimeout(pendingSwapTimer);
+            pendingSwapTimer = setTimeout(() => {
+                if (token !== swapToken) {
+                    return;
+                }
+                if (pendingPlayer) {
+                    pendingPlayer.close();
+                    pendingPlayer = null;
+                }
+                pendingQuality = '';
+                qualitySelect.disabled = false;
+                qualitySelect.value = activeQuality;
+            }, 10000);
+        };
+        window.addEventListener('beforeunload', () => {
+            activePlayer.close();
+            if (pendingPlayer) pendingPlayer.close();
+            clearTimeout(pendingSwapTimer);
+        }, {once: true});
+        const applySelectedQuality = () => {
+            const nextQuality = qualitySelect.value;
+            if (nextQuality === activeQuality) {
+                return;
+            }
+            pendingQuality = nextQuality;
+            swapQuality(nextQuality);
+        };
+        qualitySelect.addEventListener('change', applySelectedQuality);
+        qualitySelect.addEventListener('input', applySelectedQuality);
+
+        let infoWs = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        const connectInfoSocket = () => {
+            infoWs = new WebSocket(`${protocol}://${location.host}/ws/info`);
+            infoWs.onopen = () => {
+                reconnectDelay = 1000;
+            };
+            infoWs.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    const stream = findStream(message, name);
+                    if (!stream) {
+                        titleEl.textContent = 'Stream not found';
+                        metaEl.textContent = 'This stream is not currently available';
+                        return;
+                    }
+                    applyQualityOptions(stream, pendingQuality || activeQuality);
+                    applyStream(stream, activeQuality);
+                } catch (err) {
+                    metaEl.textContent = err.message || String(err);
+                }
+            };
+            infoWs.onclose = () => {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(connectInfoSocket, reconnectDelay);
+                reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+            };
+            infoWs.onerror = () => {
+                if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
+                    infoWs.close();
+                }
+            };
+        };
+        connectInfoSocket();
+        window.addEventListener('beforeunload', () => {
+            clearTimeout(pendingSwapTimer);
+            clearTimeout(reconnectTimer);
+            if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
+                infoWs.close();
+            }
+        }, {once: true});
+    }
+
+    main().catch((err) => {
+        document.getElementById('stream-title').textContent = 'Failed to load stream';
+        document.getElementById('stream-meta').textContent = err.message || String(err);
+    });
+</script>
+</body>
+</html>

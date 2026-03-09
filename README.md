@@ -57,6 +57,14 @@ upstreams:
     sourceType: usb
     device: default
     codec: h264
+    onDemand: true
+    renditions:
+      - name: low
+        bitrateKbps: 450
+      - name: mid
+        bitrateKbps: 900
+      - name: high
+        bitrateKbps: 1600
 ```
 
 `sourceType` defaults to `rtsp`. For USB sources:
@@ -64,7 +72,11 @@ upstreams:
 - `device` accepts `default`, the macOS camera name, or the macOS device unique ID
 - `codec` must be `h264` or `h265`
 - `frameRate` is optional
+- `bitrateKbps` is optional
+- `onDemand` is optional; when `true`, renditions start on first viewer and stop a few seconds after the last viewer disconnects
+- `renditions` is optional for macOS USB streams; select one with `?quality=low`, `?quality=mid`, or `?quality=high`
 - on macOS, the stream framerate is derived from actual camera timestamps; `frameRate` acts only as an optional capture/encoder hint
+- on macOS, `bitrateKbps` configures the native `VideoToolbox` encoder target bitrate for USB streams
 - on Linux, `frameRate` is still used when synthesizing timestamps for compressed `v4l2` sources
 
 Native USB support currently includes:
@@ -92,6 +104,47 @@ Windows notes:
 - Stream by number: `ws://localhost:8080/stream/no/0`
 - Metrics: http://localhost:8080/metrics
 - Stream Information: http://localhost:8080/info
+- Stream CRUD API: `http://localhost:8080/api/streams`
+
+### Stream API
+
+- `GET /api/streams` list all streams
+- `POST /api/streams` create a stream
+- `GET /api/streams/:name` get one stream
+- `PUT /api/streams/:name` update and restart one stream
+- `DELETE /api/streams/:name` delete and stop one stream
+
+Example request body:
+
+```json
+{
+  "name": "camera2",
+  "sourceType": "rtsp",
+  "rtspUrl": "rtsp://192.168.1.101:554/stream"
+}
+```
+
+USB example:
+
+```json
+{
+  "name": "usbCamera",
+  "sourceType": "usb",
+  "device": "default",
+  "codec": "h264",
+  "onDemand": true,
+  "renditions": [
+    {"name": "low", "bitrateKbps": 450},
+    {"name": "mid", "bitrateKbps": 900},
+    {"name": "high", "bitrateKbps": 1600}
+  ]
+}
+```
+
+Examples:
+
+- `http://localhost:8080/streams/usbCamera?quality=low`
+- `ws://localhost:8080/stream/usbCamera?quality=high`
 
 ### Telemetry
 

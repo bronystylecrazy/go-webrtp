@@ -26,6 +26,7 @@ static uint32_t WebrtpUsbPts90k(CMTime pts) {
 @property(nonatomic, assign) VTCompressionSessionRef compression;
 @property(nonatomic, assign) CMVideoCodecType codecType;
 @property(nonatomic, assign) Float64 fps;
+@property(nonatomic, assign) int bitrateKbps;
 @property(nonatomic, assign) BOOL includeParameterSets;
 @end
 
@@ -118,13 +119,14 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
 
 @implementation WebrtpUsbMacCapture
 
-- (instancetype)initWithHandle:(uintptr_t)handle codec:(NSString *)codec fps:(double)fps {
+- (instancetype)initWithHandle:(uintptr_t)handle codec:(NSString *)codec fps:(double)fps bitrateKbps:(int)bitrateKbps {
     self = [super init];
     if (self == nil) {
         return nil;
     }
     _handle = handle;
     _fps = fps;
+    _bitrateKbps = bitrateKbps;
     _queue = dispatch_queue_create("go.webrtp.usb.capture", DISPATCH_QUEUE_SERIAL);
     _includeParameterSets = YES;
     if ([[codec lowercaseString] isEqualToString:@"h265"]) {
@@ -233,6 +235,11 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
     if (self.fps > 0) {
         VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFTypeRef) @(self.fps));
     }
+    if (self.bitrateKbps > 0) {
+        int bitrate = self.bitrateKbps * 1000;
+        VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef) @(bitrate));
+        VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_DataRateLimits, (__bridge CFArrayRef) @[@(bitrate * 2 / 8), @1]);
+    }
     VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, (__bridge CFTypeRef) @(2.0));
     VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_ProfileLevel, self.codecType == kCMVideoCodecType_HEVC ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
 
@@ -278,11 +285,11 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
 
 @end
 
-void *WebrtpUsbMacCaptureStart(const char *device, const char *codec, double fps, uintptr_t handle, char **errOut) {
+void *WebrtpUsbMacCaptureStart(const char *device, const char *codec, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
     @autoreleasepool {
         NSString *deviceName = device != NULL ? [NSString stringWithUTF8String:device] : @"default";
         NSString *codecName = codec != NULL ? [NSString stringWithUTF8String:codec] : @"h264";
-        WebrtpUsbMacCapture *capture = [[WebrtpUsbMacCapture alloc] initWithHandle:handle codec:codecName fps:fps];
+        WebrtpUsbMacCapture *capture = [[WebrtpUsbMacCapture alloc] initWithHandle:handle codec:codecName fps:fps bitrateKbps:bitrateKbps];
         NSError *error = nil;
         if (![capture startWithDevice:deviceName error:&error]) {
             if (errOut != NULL) {

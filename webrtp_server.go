@@ -9,6 +9,7 @@ import (
 )
 
 func (r *Instance) Start(addr string) error {
+	r.stop.Store(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
@@ -27,7 +28,11 @@ func (r *Instance) Start(addr string) error {
 }
 
 func (r *Instance) Connect() error {
+	r.stop.Store(false)
 	for {
+		if r.stop.Load() {
+			return nil
+		}
 		r.hub.Reset()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -35,6 +40,10 @@ func (r *Instance) Connect() error {
 
 		conn, err := r.connectSource(ctx)
 		if err != nil {
+			if r.stop.Load() {
+				cancel()
+				return nil
+			}
 			r.logger.Printf("source connect failed: %v", err)
 			cancel()
 			time.Sleep(10 * time.Second)
@@ -48,6 +57,9 @@ func (r *Instance) Connect() error {
 		for {
 			select {
 			case <-ctx.Done():
+				if r.stop.Load() {
+					return nil
+				}
 				r.logger.Printf("source connection dropped, reconnecting")
 				goto reconnect
 			case <-ticker.C:
@@ -63,11 +75,13 @@ func (r *Instance) Connect() error {
 }
 
 func (r *Instance) Stop() error {
+	r.stop.Store(true)
 	if r.cancel != nil {
 		r.cancel()
 	}
 	if r.conn != nil {
 		r.conn.Close()
 	}
+	r.hub.Reset()
 	return nil
 }

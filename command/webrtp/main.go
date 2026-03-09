@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,6 +32,12 @@ var indexHtml []byte
 //go:embed index.css
 var indexCss []byte
 
+//go:embed stream.html
+var streamHtml []byte
+
+//go:embed dashboard.html
+var dashboardHtml []byte
+
 var CLI struct {
 	Config         string `help:"Config file path" short:"c" default:"config.yml"`
 	Interface      bool   `help:"Use graphical interface" short:"i" default:"false"`
@@ -44,26 +52,42 @@ type Config struct {
 }
 
 type Upstream struct {
-	Name       *string  `yaml:"name"`
-	SourceType *string  `yaml:"sourceType"`
-	RtspUrl    string   `yaml:"rtspUrl"`
-	Device     string   `yaml:"device"`
-	Codec      string   `yaml:"codec"`
-	FrameRate  *float64 `yaml:"frameRate"`
+	Name        *string      `yaml:"name"`
+	SourceType  *string      `yaml:"sourceType"`
+	RtspUrl     string       `yaml:"rtspUrl"`
+	Device      string       `yaml:"device"`
+	Codec       string       `yaml:"codec"`
+	FrameRate   *float64     `yaml:"frameRate"`
+	BitrateKbps *int         `yaml:"bitrateKbps"`
+	OnDemand    bool         `yaml:"onDemand"`
+	Renditions  []*Rendition `yaml:"renditions"`
+}
+
+type Rendition struct {
+	Name        string `yaml:"name"`
+	BitrateKbps int    `yaml:"bitrateKbps"`
 }
 
 type Stream struct {
-	Name    string
-	Url     string
-	Inst    *webrtp.Instance
-	Hub     *webrtp.Hub
-	Handler fiber.Handler
+	Name          string
+	GroupName     string
+	RenditionName string
+	Url           string
+	Inst          *webrtp.Instance
+	Hub           *webrtp.Hub
+	Handler       fiber.Handler
+	Stop          func() error
+	OnDemand      bool
+	startMu       sync.Mutex
+	started       atomic.Bool
+	stopTimerMu   sync.Mutex
+	stopTimer     *time.Timer
 }
 
 type tickMsg struct{ time.Time }
 
 type Model struct {
-	streams      []*Stream
+	manager      *StreamManager
 	page         int
 	pageSize     int
 	stats        []webrtp.StreamStats
@@ -97,16 +121,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.page--
 			}
 		case "right", "l":
-			if (m.page+1)*m.pageSize < len(m.streams) {
+			if (m.page+1)*m.pageSize < len(m.manager.StreamListExpandedActive()) {
 				m.page++
 			}
 		}
 	case tickMsg:
 		m.stats = nil
-		for _, s := range m.streams {
-			m.stats = append(m.stats, s.Hub.GetStats(s.Name))
+		streams := m.manager.StreamListExpandedActive()
+		for _, s := range streams {
+			m.stats = append(m.stats, s.Hub.GetStats(tuiStreamDisplayName(s)))
 		}
-		MetricsUpdate(m.streams)
+		MetricsUpdate(m.manager.StreamList())
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return tickMsg{t}
 		})
@@ -127,23 +152,24 @@ func (m *Model) View() string {
 
 	var rows []table.Row
 	m.stats = nil
+	streams := m.manager.StreamListExpandedActive()
 
 	start := m.page * m.pageSize
 	end := start + m.pageSize
-	if end > len(m.streams) {
-		end = len(m.streams)
+	if end > len(streams) {
+		end = len(streams)
 	}
 
-	for i := start; i < end && i < len(m.streams); i++ {
-		s := m.streams[i]
-		stats := s.Hub.GetStats(s.Name)
+	for i := start; i < end && i < len(streams); i++ {
+		s := streams[i]
+		stats := s.Hub.GetStats(tuiStreamDisplayName(s))
 
 		status := "Ready"
 		if !stats.Ready {
 			status = "Waiting"
 		}
 
-		name := s.Name
+		name := tuiStreamDisplayName(s)
 		if name == strconv.Itoa(i) {
 			name = "N/A"
 		}
@@ -195,7 +221,10 @@ func (m *Model) View() string {
 	s.Selected = lipgloss.Style{}
 	t.SetStyles(s)
 
-	totalPages := (len(m.streams) + m.pageSize - 1) / m.pageSize
+	totalPages := 1
+	if len(streams) > 0 {
+		totalPages = (len(streams) + m.pageSize - 1) / m.pageSize
+	}
 	nav := dimStyle.Render(fmt.Sprintf("Page %d/%d (←/→ to navigate, q to quit)", m.page+1, totalPages))
 
 	// Build logs view (last 10 lines)
@@ -244,6 +273,75 @@ func truncateCell(s string, maxWidth int) string {
 	return strings.TrimRight(s[:maxWidth-2], " ") + "… "
 }
 
+func streamDisplayName(s *Stream) string {
+	if s.GroupName != "" {
+		return s.GroupName
+	}
+	return s.Name
+}
+
+func tuiStreamDisplayName(s *Stream) string {
+	if s.GroupName != "" && s.RenditionName != "" {
+		return fmt.Sprintf("%s/%s", s.GroupName, s.RenditionName)
+	}
+	return streamDisplayName(s)
+}
+
+func (s *Stream) EnsureStarted() {
+	if !s.OnDemand || s.started.Load() {
+		return
+	}
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.started.Load() {
+		return
+	}
+	s.stopTimerMu.Lock()
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+		s.stopTimer = nil
+	}
+	s.stopTimerMu.Unlock()
+	s.started.Store(true)
+	go func() {
+		if err := s.Inst.Connect(); err != nil {
+			log.Printf("stream %s: %v", s.Name, err)
+		}
+		s.started.Store(false)
+	}()
+}
+
+func (s *Stream) StopNow() error {
+	s.stopTimerMu.Lock()
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+		s.stopTimer = nil
+	}
+	s.stopTimerMu.Unlock()
+	s.started.Store(false)
+	return s.Stop()
+}
+
+func (s *Stream) MaybeScheduleStop(idle time.Duration) {
+	if !s.OnDemand {
+		return
+	}
+	if s.Hub.GetStats(s.Name).ClientCount > 0 {
+		return
+	}
+	s.stopTimerMu.Lock()
+	defer s.stopTimerMu.Unlock()
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+	}
+	s.stopTimer = time.AfterFunc(idle, func() {
+		if s.Hub.GetStats(s.Name).ClientCount > 0 {
+			return
+		}
+		_ = s.StopNow()
+	})
+}
+
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -255,29 +353,9 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
 
-	if len(cfg.Upstreams) == 0 {
-		return nil, fmt.Errorf("no upstreams defined in config")
-	}
-
 	for _, u := range cfg.Upstreams {
-		sourceType := "rtsp"
-		if u.SourceType != nil && *u.SourceType != "" {
-			sourceType = strings.ToLower(*u.SourceType)
-		}
-		switch sourceType {
-		case "rtsp":
-			if u.RtspUrl == "" {
-				return nil, fmt.Errorf("rtsp upstream missing required rtspUrl")
-			}
-		case "usb":
-			if u.Device == "" {
-				return nil, fmt.Errorf("usb upstream missing required device")
-			}
-			if u.Codec == "" {
-				return nil, fmt.Errorf("usb upstream missing required codec")
-			}
-		default:
-			return nil, fmt.Errorf("unsupported sourceType: %s", sourceType)
+		if err := StreamValidateUpstream(u); err != nil {
+			return nil, err
 		}
 	}
 
@@ -307,53 +385,9 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	streams := make([]*Stream, len(cfg.Upstreams))
-	for i, u := range cfg.Upstreams {
-		name := strconv.Itoa(i)
-		if u.Name != nil && *u.Name != "" {
-			name = *u.Name
-		}
-		prefix := fmt.Sprintf("[#%d: %s]", i, name)
-		logger := NewLogger(prefix, log.Default())
-		sourceType := "rtsp"
-		if u.SourceType != nil && *u.SourceType != "" {
-			sourceType = strings.ToLower(*u.SourceType)
-		}
-		frameRate := 0.0
-		if u.FrameRate != nil {
-			frameRate = *u.FrameRate
-		}
-		url := u.RtspUrl
-		if sourceType == "usb" {
-			url = u.Device
-		}
-		inst := webrtp.Init(&webrtp.Config{
-			SourceType: sourceType,
-			Rtsp:       u.RtspUrl,
-			Device:     u.Device,
-			Codec:      u.Codec,
-			FrameRate:  frameRate,
-			Logger:     logger,
-		})
-		streams[i] = &Stream{
-			Name:    name,
-			Url:     url,
-			Inst:    inst,
-			Hub:     inst.GetHub(),
-			Handler: inst.Handler(),
-		}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Connect all streams to RTSP
-	for _, s := range streams {
-		go func(ss *Stream) {
-			if err := ss.Inst.Connect(); err != nil {
-				log.Printf("stream %s: %v", ss.Name, err)
-			}
-		}(s)
+	manager, err := StreamManagerNew(CLI.Config, cfg)
+	if err != nil {
+		log.Fatalf("stream manager: %v", err)
 	}
 
 	// Create single fiber instance
@@ -361,29 +395,98 @@ func main() {
 	app.Use(cors.New())
 
 	// Register routes
-	for i, s := range streams {
-		idx := i
-		app.All(fmt.Sprintf("/stream/no/%d", idx), func(c fiber.Ctx) error {
-			return streams[idx].Handler(c)
-		})
-		app.All(fmt.Sprintf("/stream/%s", s.Name), func(c fiber.Ctx) error {
-			return streams[idx].Handler(c)
-		})
-	}
+	app.All("/stream/no/:index<int>", func(c fiber.Ctx) error {
+		index, err := strconv.Atoi(c.Params("index"))
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid stream index")
+		}
+		stream, ok := manager.StreamByIndex(index)
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		stream.EnsureStarted()
+		return stream.Handler(c)
+	})
+	app.All("/stream/:name", func(c fiber.Ctx) error {
+		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		stream.EnsureStarted()
+		return stream.Handler(c)
+	})
 
 	app.Get("/info", func(c fiber.Ctx) error {
+		streams := manager.StreamList()
 		stats := make([]*webrtp.StreamStats, len(streams))
 		for i, s := range streams {
-			streamStats := s.Hub.GetStats(s.Name)
-			streamStats.Name = s.Name
+			streamStats := s.Hub.GetStats(streamDisplayName(s))
+			streamStats.Name = streamDisplayName(s)
 			stats[i] = &streamStats
 		}
 		MetricsUpdate(streams)
 		return c.JSON(webrtp.Status{Streams: stats})
 	})
+	app.Get("/api/streams", func(c fiber.Ctx) error {
+		items := manager.StreamStatusList()
+		StreamResponsesSort(items)
+		return c.JSON(items)
+	})
+	app.All("/ws/info", StatusSocketHandler(manager))
+	app.All("/ws/dashboard", DashboardSocketHandler(manager))
+	app.Post("/api/streams", func(c fiber.Ctx) error {
+		req := &StreamApiRequest{}
+		if err := c.Bind().Body(req); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		item, err := manager.StreamCreate(req)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.Status(fiber.StatusCreated).JSON(item)
+	})
+	app.Get("/api/streams/:name", func(c fiber.Ctx) error {
+		item, ok := manager.StreamStatus(c.Params("name"))
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		return c.JSON(item)
+	})
+	app.Put("/api/streams/:name", func(c fiber.Ctx) error {
+		req := &StreamApiRequest{}
+		if err := c.Bind().Body(req); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		item, err := manager.StreamUpdate(c.Params("name"), req)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Delete("/api/streams/:name", func(c fiber.Ctx) error {
+		if err := manager.StreamDelete(c.Params("name")); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
 
 	app.Get("/", func(c fiber.Ctx) error {
 		return c.Type("html").Send(indexHtml)
+	})
+	app.Get("/streams/:name", func(c fiber.Ctx) error {
+		if _, ok := manager.StreamByName(c.Params("name")); !ok {
+			return fiber.ErrNotFound
+		}
+		return c.Type("html").Send(streamHtml)
+	})
+	app.Get("/dashboard", func(c fiber.Ctx) error {
+		return c.Type("html").Send(dashboardHtml)
 	})
 
 	app.Get("/index.css", func(c fiber.Ctx) error {
@@ -411,34 +514,37 @@ func main() {
 		addr := fmt.Sprintf(":%d", CLI.Port)
 		log.Printf("HTTP server listening on http://localhost%s", addr)
 		log.Printf("Streams available:")
-		for i, s := range streams {
-			log.Printf("  - /stream/no/%d (%s) -> %s", i, s.Name, s.Url)
+		for i, s := range manager.StreamList() {
+			log.Printf("  - /stream/no/%d (%s) -> %s", i, streamDisplayName(s), s.Url)
 		}
 		if err := app.Listen(addr); err != nil {
 			log.Printf("HTTP: %v", err)
 		}
 	}()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	if CLI.Interface && isatty.IsTerminal(os.Stdout.Fd()) {
-		runTUI(ctx, streams)
+		runTUI(ctx, manager)
 	} else {
-		runServer(ctx, streams)
+		runServer(ctx, manager)
 	}
 }
 
-func runServer(ctx context.Context, streams []*Stream) {
+func runServer(ctx context.Context, manager *StreamManager) {
+	_ = ctx
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 	log.Println("shutting down")
-	for _, s := range streams {
-		s.Inst.Stop()
-	}
+	manager.StreamStopAll()
 }
 
-func runTUI(ctx context.Context, streams []*Stream) {
+func runTUI(ctx context.Context, manager *StreamManager) {
+	_ = ctx
 	m := &Model{
-		streams:  streams,
+		manager:  manager,
 		pageSize: 10,
 		logs:     []string{},
 	}

@@ -1,9 +1,18 @@
 upstreams:
-  - name: camera1
-    rtspUrl: rtsp://localhost:8554/stream1
-  - rtspUrl: rtsp://localhost:8554/stream2
-  - name: usbCamera
+  - name: macbookCam
     sourceType: usb
     device: default
     codec: h264
+    onDemand: true
     frameRate: 30
+    renditions:
+      - name: ultra-low
+        bitrateKbps: 150
+      - name: low
+        bitrateKbps: 450
+      - name: mid
+        bitrateKbps: 900
+      - name: high
+        bitrateKbps: 1600
+      - name: ultra-high
+        bitrateKbps: 16000

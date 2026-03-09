@@ -13,7 +13,7 @@ typedef void *WebrtpUsbMacCaptureRef;
 extern void WebrtpUsbMacPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
 extern void WebrtpUsbMacError(uintptr_t handle, char *msg);
 
-WebrtpUsbMacCaptureRef WebrtpUsbMacCaptureStart(const char *device, const char *codec, double fps, uintptr_t handle, char **errOut);
+WebrtpUsbMacCaptureRef WebrtpUsbMacCaptureStart(const char *device, const char *codec, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
 void WebrtpUsbMacCaptureStop(WebrtpUsbMacCaptureRef ref);
 char *WebrtpUsbMacDeviceList(char **errOut);
 */
@@ -86,7 +86,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	defer C.free(unsafe.Pointer(cCodec))
 
 	var cErr *C.char
-	ref := C.WebrtpUsbMacCaptureStart(cDevice, cCodec, C.double(fps), C.uintptr_t(handle), &cErr)
+	ref := C.WebrtpUsbMacCaptureStart(cDevice, cCodec, C.double(fps), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
 	if ref == nil {
 		usbRegistry.Delete(handle)
 		cancel()

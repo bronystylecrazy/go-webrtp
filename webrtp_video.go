@@ -46,7 +46,7 @@ func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 		r.logger.Printf("buildFragment: %v", err)
 		return
 	}
-	r.hub.Broadcast(frag)
+	r.hub.Broadcast(frag, isIDR)
 }
 
 func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []byte) {
