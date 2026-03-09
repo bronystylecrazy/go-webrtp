@@ -31,9 +31,10 @@ var indexHtml []byte
 var indexCss []byte
 
 var CLI struct {
-	Config    string `help:"Config file path" short:"c" default:"config.yml"`
-	Interface bool   `help:"Use graphical interface" short:"i" default:"false"`
-	Port      int    `help:"HTTP server port" short:"p" default:"8080"`
+	Config         string `help:"Config file path" short:"c" default:"config.yml"`
+	Interface      bool   `help:"Use graphical interface" short:"i" default:"false"`
+	Port           int    `help:"HTTP server port" short:"p" default:"8080"`
+	ListUsbDevices bool   `help:"List available USB video devices and exit" default:"false"`
 }
 
 type Config struct {
@@ -43,8 +44,12 @@ type Config struct {
 }
 
 type Upstream struct {
-	Name    *string `yaml:"name"`
-	RtspUrl string  `yaml:"rtspUrl" validate:"required"`
+	Name       *string  `yaml:"name"`
+	SourceType *string  `yaml:"sourceType"`
+	RtspUrl    string   `yaml:"rtspUrl"`
+	Device     string   `yaml:"device"`
+	Codec      string   `yaml:"codec"`
+	FrameRate  *float64 `yaml:"frameRate"`
 }
 
 type Stream struct {
@@ -255,8 +260,24 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	for _, u := range cfg.Upstreams {
-		if u.RtspUrl == "" {
-			return nil, fmt.Errorf("upstream missing required rtspUrl")
+		sourceType := "rtsp"
+		if u.SourceType != nil && *u.SourceType != "" {
+			sourceType = strings.ToLower(*u.SourceType)
+		}
+		switch sourceType {
+		case "rtsp":
+			if u.RtspUrl == "" {
+				return nil, fmt.Errorf("rtsp upstream missing required rtspUrl")
+			}
+		case "usb":
+			if u.Device == "" {
+				return nil, fmt.Errorf("usb upstream missing required device")
+			}
+			if u.Codec == "" {
+				return nil, fmt.Errorf("usb upstream missing required codec")
+			}
+		default:
+			return nil, fmt.Errorf("unsupported sourceType: %s", sourceType)
 		}
 	}
 
@@ -265,6 +286,21 @@ func loadConfig(path string) (*Config, error) {
 
 func main() {
 	kong.Parse(&CLI)
+
+	if CLI.ListUsbDevices {
+		devices, err := webrtp.UsbDeviceList()
+		if err != nil {
+			log.Fatalf("list usb devices: %v", err)
+		}
+		if len(devices) == 0 {
+			log.Printf("No USB video devices found")
+			return
+		}
+		for _, device := range devices {
+			log.Printf("%s\t%s", device.Id, device.Name)
+		}
+		return
+	}
 
 	cfg, err := loadConfig(CLI.Config)
 	if err != nil {
@@ -279,13 +315,29 @@ func main() {
 		}
 		prefix := fmt.Sprintf("[#%d: %s]", i, name)
 		logger := NewLogger(prefix, log.Default())
+		sourceType := "rtsp"
+		if u.SourceType != nil && *u.SourceType != "" {
+			sourceType = strings.ToLower(*u.SourceType)
+		}
+		frameRate := 0.0
+		if u.FrameRate != nil {
+			frameRate = *u.FrameRate
+		}
+		url := u.RtspUrl
+		if sourceType == "usb" {
+			url = u.Device
+		}
 		inst := webrtp.Init(&webrtp.Config{
-			Rtsp:   u.RtspUrl,
-			Logger: logger,
+			SourceType: sourceType,
+			Rtsp:       u.RtspUrl,
+			Device:     u.Device,
+			Codec:      u.Codec,
+			FrameRate:  frameRate,
+			Logger:     logger,
 		})
 		streams[i] = &Stream{
 			Name:    name,
-			Url:     u.RtspUrl,
+			Url:     url,
 			Inst:    inst,
 			Hub:     inst.GetHub(),
 			Handler: inst.Handler(),

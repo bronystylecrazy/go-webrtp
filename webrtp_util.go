@@ -49,16 +49,54 @@ func BuildInitH265(vps, sps, pps []byte) ([]byte, error) {
 // AnnexbToAvcc converts Annex-B NAL units to AVCC format.
 func AnnexbToAvcc(au [][]byte) []byte {
 	var buf bytes.Buffer
-	for idx, nalu := range au {
+	for _, nalu := range au {
 		ln := make([]byte, 4)
 		binary.BigEndian.PutUint32(ln, uint32(len(nalu)))
 		buf.Write(ln)
 		buf.Write(nalu)
-		if idx < 3 && len(nalu) > 0 {
-			fmt.Printf("[AnnexbToAvcc] NAL %d: len=%d, first_bytes=%x\n", idx, len(nalu), nalu[:min(8, len(nalu))])
-		}
 	}
 	return buf.Bytes()
+}
+
+// AnnexbToNalus splits an Annex-B byte stream into NAL units.
+func AnnexbToNalus(data []byte) [][]byte {
+	indices := make([]int, 0)
+	i := 0
+	for i < len(data)-3 {
+		if data[i] == 0 && data[i+1] == 0 {
+			if data[i+2] == 1 {
+				indices = append(indices, i)
+				i += 3
+				continue
+			}
+			if i+3 < len(data) && data[i+2] == 0 && data[i+3] == 1 {
+				indices = append(indices, i)
+				i += 4
+				continue
+			}
+		}
+		i++
+	}
+	if len(indices) == 0 {
+		return nil
+	}
+
+	nalus := make([][]byte, 0, len(indices))
+	for idx, start := range indices {
+		offset := 3
+		if start+3 < len(data) && data[start+2] == 0 && data[start+3] == 1 {
+			offset = 4
+		}
+		end := len(data)
+		if idx+1 < len(indices) {
+			end = indices[idx+1]
+		}
+		nalu := bytes.Trim(data[start+offset:end], "\x00")
+		if len(nalu) > 0 {
+			nalus = append(nalus, nalu)
+		}
+	}
+	return nalus
 }
 
 // BuildFragment creates an fMP4 media fragment.

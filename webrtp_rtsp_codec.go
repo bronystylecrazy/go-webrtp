@@ -8,7 +8,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 )
 
-func (r *Instance) setupCodecHandler(c *gortsplib.Client, desc *description.Session, h *rtspHandler) error {
+func (r *Instance) setupCodecHandler(c *gortsplib.Client, desc *description.Session, h *videoHandler) error {
 	var h264Format *format.H264
 	h264Media := desc.FindFormat(&h264Format)
 

@@ -4,6 +4,7 @@ package webrtp
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -13,7 +14,11 @@ type Logger interface {
 }
 
 type Config struct {
+	SourceType      string
 	Rtsp            string
+	Device          string
+	Codec           string
+	FrameRate       float64
 	Logger          Logger
 	WriteTimeout    time.Duration
 	ReadBufferSize  int
@@ -24,7 +29,7 @@ type Instance struct {
 	cfg    *Config
 	hub    *Hub
 	logger Logger
-	conn   *rtspConn
+	conn   sourceConn
 	cancel context.CancelFunc
 }
 
@@ -50,9 +55,17 @@ func Init(cfg *Config) *Instance {
 	if writeBuf == 0 {
 		writeBuf = 128 * 1024
 	}
+	sourceType := strings.ToLower(strings.TrimSpace(cfg.SourceType))
+	if sourceType == "" {
+		sourceType = "rtsp"
+	}
 	return &Instance{
 		cfg: &Config{
+			SourceType:      sourceType,
 			Rtsp:            cfg.Rtsp,
+			Device:          cfg.Device,
+			Codec:           strings.ToLower(strings.TrimSpace(cfg.Codec)),
+			FrameRate:       cfg.FrameRate,
 			Logger:          logger,
 			WriteTimeout:    writeTimeout,
 			ReadBufferSize:  readBuf,

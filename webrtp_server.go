@@ -12,10 +12,10 @@ func (r *Instance) Start(addr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
-	conn, err := r.connectRtsp(ctx)
+	conn, err := r.connectSource(ctx)
 	if err != nil {
 		cancel()
-		return fmt.Errorf("rtsp connect: %w", err)
+		return fmt.Errorf("source connect: %w", err)
 	}
 	r.conn = conn
 
@@ -33,9 +33,9 @@ func (r *Instance) Connect() error {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.cancel = cancel
 
-		conn, err := r.connectRtsp(ctx)
+		conn, err := r.connectSource(ctx)
 		if err != nil {
-			r.logger.Printf("rtsp connect failed: %v", err)
+			r.logger.Printf("source connect failed: %v", err)
 			cancel()
 			time.Sleep(10 * time.Second)
 			continue
@@ -48,7 +48,7 @@ func (r *Instance) Connect() error {
 		for {
 			select {
 			case <-ctx.Done():
-				r.logger.Printf("rtsp connection dropped, reconnecting")
+				r.logger.Printf("source connection dropped, reconnecting")
 				goto reconnect
 			case <-ticker.C:
 				if r.hub.ready.Load() && !r.hub.IsReceivingFrames() {

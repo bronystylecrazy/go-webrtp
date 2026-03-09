@@ -1,6 +1,6 @@
 # go-webrtp
 
-Golang library for streaming RTP packet from RTSP source directly to web in real-time.
+Golang library for streaming video from RTSP or native USB camera sources directly to web in real-time.
 
 ## Screenshot
 
@@ -39,6 +39,7 @@ Download the latest release binary from [GitHub Releases](https://github.com/con
 ```
   -c, --config string    Config file path (default: config.yml)
   -i, --interface       Use graphical interface (default: false)
+      --list-usb-devices List available USB video devices and exit
   -p, --port int        HTTP server port (default: 8080)
 ```
 
@@ -52,7 +53,37 @@ telemetryEndpoint: "localhost:4317" # Optional: OTEL gRPC endpoint for pushing m
 upstreams:
   - name: camera1
     rtspUrl: rtsp://192.168.1.100:554/stream
+  - name: usbCamera
+    sourceType: usb
+    device: default
+    codec: h264
 ```
+
+`sourceType` defaults to `rtsp`. For USB sources:
+
+- `device` accepts `default`, the macOS camera name, or the macOS device unique ID
+- `codec` must be `h264` or `h265`
+- `frameRate` is optional
+- on macOS, the stream framerate is derived from actual camera timestamps; `frameRate` acts only as an optional capture/encoder hint
+- on Linux, `frameRate` is still used when synthesizing timestamps for compressed `v4l2` sources
+
+Native USB support currently includes:
+
+- macOS: `AVFoundation` capture with native `VideoToolbox` H264/H265 encoding
+- Linux: `v4l2` ingest for devices that already expose H264/H265 elementary streams
+- Windows: native `Media Foundation` ingest for devices that expose H264/H265 output natively
+
+To list available USB cameras before configuring a stream:
+
+```bash
+go run ./command/webrtp --list-usb-devices
+```
+
+Windows notes:
+
+- `device` should be the device name or symbolic link returned by `--list-usb-devices`
+- `codec` should be `h264` or `h265`
+- the current native Windows path does not transcode raw webcam formats in-process yet; the camera must expose compressed H264/H265 media types
 
 ### Endpoint
 

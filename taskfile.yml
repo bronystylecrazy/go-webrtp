@@ -1,0 +1,112 @@
+version: "3"
+
+vars:
+  APP: webrtp
+  MAIN: ./command/webrtp
+  RELEASE_DIR: .local/release
+  LD_FLAGS: -s -w
+  WIN_CC_AMD64: zig cc -target x86_64-windows-gnu
+  WIN_CXX_AMD64: zig c++ -target x86_64-windows-gnu
+  WIN_CC_ARM64: zig cc -target aarch64-windows-gnu
+  WIN_CXX_ARM64: zig c++ -target aarch64-windows-gnu
+
+tasks:
+  default:
+    cmds:
+      - task: test
+
+  run:
+    cmds:
+      - go run {{.MAIN}}
+
+  run:interface:
+    cmds:
+      - go run {{.MAIN}} -i -c command/webrtp/config.yml
+
+  usb:list:
+    cmds:
+      - go run {{.MAIN}} --list-usb-devices
+
+  test:
+    cmds:
+      - go test ./...
+
+  test:windows-amd64:
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: "1"
+      CC: '{{.WIN_CC_AMD64}}'
+      CXX: '{{.WIN_CXX_AMD64}}'
+    cmds:
+      - go test ./...
+
+  build:
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -o {{.RELEASE_DIR}}/{{.APP}} {{.MAIN}}
+
+  build:darwin-arm64:
+    env:
+      CGO_ENABLED: "1"
+      GOOS: darwin
+      GOARCH: arm64
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-darwin-arm64 {{.MAIN}}
+
+  build:darwin-amd64:
+    env:
+      CGO_ENABLED: "1"
+      GOOS: darwin
+      GOARCH: amd64
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-darwin-amd64 {{.MAIN}}
+
+  build:linux-amd64:
+    env:
+      GOOS: linux
+      GOARCH: amd64
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-linux-amd64 {{.MAIN}}
+
+  build:linux-arm64:
+    env:
+      GOOS: linux
+      GOARCH: arm64
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-linux-arm64 {{.MAIN}}
+
+  build:windows-amd64:
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: "1"
+      CC: '{{.WIN_CC_AMD64}}'
+      CXX: '{{.WIN_CXX_AMD64}}'
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-windows-amd64.exe {{.MAIN}}
+
+  build:windows-arm64:
+    env:
+      GOOS: windows
+      GOARCH: arm64
+      CGO_ENABLED: "1"
+      CC: '{{.WIN_CC_ARM64}}'
+      CXX: '{{.WIN_CXX_ARM64}}'
+    cmds:
+      - mkdir -p {{.RELEASE_DIR}}
+      - go build -trimpath -ldflags="{{.LD_FLAGS}}" -o {{.RELEASE_DIR}}/{{.APP}}-windows-arm64.exe {{.MAIN}}
+
+  build:release:
+    cmds:
+      - task: build:darwin-arm64
+      - task: build:darwin-amd64
+      - task: build:linux-amd64
+      - task: build:linux-arm64
+      - task: build:windows-amd64
+      - task: build:windows-arm64
