@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,8 @@ type Upstream struct {
 	RtspUrl     string       `yaml:"rtspUrl"`
 	Device      string       `yaml:"device"`
 	Codec       string       `yaml:"codec"`
+	Width       *int         `yaml:"width"`
+	Height      *int         `yaml:"height"`
 	FrameRate   *float64     `yaml:"frameRate"`
 	BitrateKbps *int         `yaml:"bitrateKbps"`
 	OnDemand    bool         `yaml:"onDemand"`
@@ -64,8 +67,9 @@ type Upstream struct {
 }
 
 type Rendition struct {
-	Name        string `yaml:"name"`
-	BitrateKbps int    `yaml:"bitrateKbps"`
+	Name        string `yaml:"name" json:"name"`
+	BitrateKbps int    `yaml:"bitrateKbps" json:"bitrateKbps"`
+	OnDemand    *bool  `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
 }
 
 type Stream struct {
@@ -85,6 +89,23 @@ type Stream struct {
 }
 
 type tickMsg struct{ time.Time }
+
+type RecordRequest struct {
+	Path        string `json:"path"`
+	OfflineMode string `json:"offlineMode"`
+}
+
+type ModeRequest struct {
+	Width     int      `json:"width"`
+	Height    int      `json:"height"`
+	FrameRate *float64 `json:"frameRate"`
+}
+
+type RecordResponse struct {
+	Stream    string                 `json:"stream"`
+	Quality   string                 `json:"quality,omitempty"`
+	Recording webrtp.RecordingStatus `json:"recording"`
+}
 
 type Model struct {
 	manager      *StreamManager
@@ -311,6 +332,10 @@ func (s *Stream) EnsureStarted() {
 	}()
 }
 
+func (s *Stream) HasActiveRecording() bool {
+	return s.Inst.RecordingStatus().Active
+}
+
 func (s *Stream) StopNow() error {
 	s.stopTimerMu.Lock()
 	if s.stopTimer != nil {
@@ -326,6 +351,9 @@ func (s *Stream) MaybeScheduleStop(idle time.Duration) {
 	if !s.OnDemand {
 		return
 	}
+	if s.HasActiveRecording() {
+		return
+	}
 	if s.Hub.GetStats(s.Name).ClientCount > 0 {
 		return
 	}
@@ -338,8 +366,51 @@ func (s *Stream) MaybeScheduleStop(idle time.Duration) {
 		if s.Hub.GetStats(s.Name).ClientCount > 0 {
 			return
 		}
+		if s.HasActiveRecording() {
+			return
+		}
 		_ = s.StopNow()
 	})
+}
+
+func sanitizeRecordingName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "stream"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func defaultRecordingPath(stream *Stream) string {
+	base := sanitizeRecordingName(stream.GroupName)
+	if base == "" {
+		base = sanitizeRecordingName(stream.Name)
+	}
+	if stream.RenditionName != "" {
+		base = base + "-" + sanitizeRecordingName(stream.RenditionName)
+	}
+	filename := fmt.Sprintf("%s-%s.mp4", base, time.Now().Format("20060102-150405"))
+	return filepath.Join("recordings", filename)
+}
+
+func recordingResponse(stream *Stream) *RecordResponse {
+	name := stream.GroupName
+	if name == "" {
+		name = stream.Name
+	}
+	return &RecordResponse{
+		Stream:    name,
+		Quality:   stream.RenditionName,
+		Recording: stream.Inst.RecordingStatus(),
+	}
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -452,6 +523,30 @@ func main() {
 		}
 		return c.JSON(item)
 	})
+	app.Post("/api/streams/:name/mode", func(c fiber.Ctx) error {
+		req := &ModeRequest{}
+		if err := c.Bind().Body(req); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		item, err := manager.StreamModeUpdate(c.Params("name"), req)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Get("/api/streams/:name/capabilities", func(c fiber.Ctx) error {
+		item, ok, err := manager.StreamCapabilities(c.Params("name"))
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		return c.JSON(item)
+	})
 	app.Put("/api/streams/:name", func(c fiber.Ctx) error {
 		req := &StreamApiRequest{}
 		if err := c.Bind().Body(req); err != nil {
@@ -474,6 +569,45 @@ func main() {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		return c.SendStatus(fiber.StatusNoContent)
+	})
+	app.Post("/api/streams/:name/record/start", func(c fiber.Ctx) error {
+		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		req := &RecordRequest{}
+		if len(c.Body()) > 0 {
+			if err := c.Bind().Body(req); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+		}
+		stream.EnsureStarted()
+		path := strings.TrimSpace(req.Path)
+		if path == "" {
+			path = defaultRecordingPath(stream)
+		}
+		if err := stream.Inst.StartRecording(path, "", req.OfflineMode); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.Status(fiber.StatusCreated).JSON(recordingResponse(stream))
+	})
+	app.Post("/api/streams/:name/record/stop", func(c fiber.Ctx) error {
+		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		if err := stream.Inst.StopRecording(); err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+		}
+		stream.MaybeScheduleStop(5 * time.Second)
+		return c.JSON(recordingResponse(stream))
+	})
+	app.Get("/api/streams/:name/record/status", func(c fiber.Ctx) error {
+		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		if !ok {
+			return fiber.ErrNotFound
+		}
+		return c.JSON(recordingResponse(stream))
 	})
 
 	app.Get("/", func(c fiber.Ctx) error {

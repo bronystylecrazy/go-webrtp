@@ -13,17 +13,22 @@ type StatusSocketMessage struct {
 }
 
 type DashboardRow struct {
-	Name       string  `json:"name"`
-	Active     bool    `json:"active"`
-	Status     string  `json:"status"`
-	Codec      string  `json:"codec"`
-	Resolution string  `json:"resolution"`
-	Framerate  float64 `json:"framerate"`
-	Bitrate    float64 `json:"bitrateKbps"`
-	Bandwidth  uint64  `json:"bandwidthBytes"`
-	Frames     uint64  `json:"frames"`
-	Clients    int32   `json:"clients"`
-	Uptime     string  `json:"uptime"`
+	Name             string  `json:"name"`
+	Active           bool    `json:"active"`
+	Status           string  `json:"status"`
+	Codec            string  `json:"codec"`
+	Resolution       string  `json:"resolution"`
+	Framerate        float64 `json:"framerate"`
+	Bitrate          float64 `json:"bitrateKbps"`
+	Bandwidth        uint64  `json:"bandwidthBytes"`
+	Frames           uint64  `json:"frames"`
+	Clients          int32   `json:"clients"`
+	Uptime           string  `json:"uptime"`
+	Recording        bool    `json:"recording"`
+	RecordingMode    string  `json:"recordingMode,omitempty"`
+	RecordingOffline string  `json:"recordingOfflineMode,omitempty"`
+	RecordingFile    string  `json:"recordingFile,omitempty"`
+	RecordingBytes   int64   `json:"recordingBytes"`
 }
 
 type DashboardSocketMessage struct {
@@ -98,22 +103,27 @@ func DashboardSocketHandler(manager *StreamManager) fiber.Handler {
 				rows := make([]*DashboardRow, 0, len(streams))
 				for _, stream := range streams {
 					stats := stream.Hub.GetStats(tuiStreamDisplayName(stream))
+					recording := stream.Inst.RecordingStatus()
 					status := "Ready"
 					if !stats.Ready {
 						status = "Waiting"
 					}
 					rows = append(rows, &DashboardRow{
-						Name:       tuiStreamDisplayName(stream),
-						Active:     stats.ClientCount > 0,
-						Status:     status,
-						Codec:      stats.Codec,
-						Resolution: fmt.Sprintf("%dx%d", stats.Width, stats.Height),
-						Framerate:  stats.Framerate,
-						Bitrate:    stats.Bitrate,
-						Bandwidth:  stats.BytesRecv,
-						Frames:     stats.FrameNo,
-						Clients:    stats.ClientCount,
-						Uptime:     formatUptime(stats.Uptime),
+						Name:             tuiStreamDisplayName(stream),
+						Active:           stats.ClientCount > 0 || recording.Active,
+						Status:           status,
+						Codec:            stats.Codec,
+						Resolution:       fmt.Sprintf("%dx%d", stats.Width, stats.Height),
+						Framerate:        stats.Framerate,
+						Bitrate:          stats.Bitrate,
+						Bandwidth:        stats.BytesRecv,
+						Frames:           stats.FrameNo,
+						Clients:          stats.ClientCount,
+						Uptime:           formatUptime(stats.Uptime),
+						Recording:        recording.Active,
+						RecordingOffline: recording.OfflineMode,
+						RecordingFile:    recording.Path,
+						RecordingBytes:   recording.BytesWritten,
 					})
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))

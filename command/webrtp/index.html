@@ -19,7 +19,6 @@
         constructor(wsUrl) {
             this.wsUrl = wsUrl;
             this.ws = null;
-            this.ws.binaryType = 'arraybuffer';
             this.canvas = null;
             this.ctx = null;
             this.decoder = null;
@@ -40,6 +39,8 @@
             this._waitingForKeyframe = false;
             this._maxPendingDecode = 8;
             this._lateFrameThreshold = 16;
+            this._lastActivityAt = Date.now();
+            this._watchdogTimer = setInterval(() => this.checkHealth(), 1000);
 
             this.connect();
         }
@@ -49,6 +50,7 @@
             this.ws = new WebSocket(this.wsUrl);
             this.ws.binaryType = 'arraybuffer';
             this.ws.onopen = () => {
+                this._lastActivityAt = Date.now();
                 this._reconnectDelay = 1000;
             };
             this.ws.onmessage = (e) => this.onMessage(e);
@@ -89,6 +91,7 @@
 
         onMessage(e) {
             if (this._paused) return;
+            this._lastActivityAt = Date.now();
 
             if (!this.initDone) {
                 this.initDone = true;
@@ -145,6 +148,15 @@
                     this.makeDecoder(this.codec, this.desc);
                 }
             }
+        }
+
+        checkHealth() {
+            if (this._closed || !this.ws) return;
+            if (this.ws.readyState !== WebSocket.OPEN) return;
+            const idleMs = Date.now() - this._lastActivityAt;
+            const limitMs = this.initDone ? 3000 : 8000;
+            if (idleMs < limitMs) return;
+            this.ws.close();
         }
 
         parseInit(buf) {
@@ -285,6 +297,7 @@
             this._closed = true;
             this._paused = true;
             clearTimeout(this._reconnectTimer);
+            clearInterval(this._watchdogTimer);
             this.resetStreamState();
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
                 this.ws.close();

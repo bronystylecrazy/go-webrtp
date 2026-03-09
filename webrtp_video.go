@@ -8,12 +8,13 @@ import (
 )
 
 type videoHandler struct {
-	hub    *Hub
-	logger Logger
-	seqNr  uint32
-	prevTS uint32
-	tsOff  uint64
-	mu     sync.Mutex
+	hub      *Hub
+	logger   Logger
+	instance *Instance
+	seqNr    uint32
+	prevTS   uint32
+	tsOff    uint64
+	mu       sync.Mutex
 }
 
 func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
@@ -40,6 +41,9 @@ func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 
 	avcc := AnnexbToAvcc(au)
 	r.seqNr++
+	if recorder := r.instance.currentRecorder(); recorder != nil {
+		recorder.RecordSample(avcc, dur, isIDR)
+	}
 
 	frag, err := BuildFragment(r.seqNr, dts, dur, isIDR, avcc)
 	if err != nil {
@@ -83,6 +87,9 @@ func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []by
 			return
 		}
 		r.hub.SetInit(initSeg)
+		if recorder := r.instance.currentRecorder(); recorder != nil {
+			recorder.SetInit(initSeg)
+		}
 
 		var width, height int
 		var spsInfo h264.SPS
@@ -138,6 +145,9 @@ func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, pps
 			return
 		}
 		r.hub.SetInit(initSeg)
+		if recorder := r.instance.currentRecorder(); recorder != nil {
+			recorder.SetInit(initSeg)
+		}
 
 		var width, height int
 		var spsInfo h265.SPS

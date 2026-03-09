@@ -57,13 +57,25 @@ func (r *Hub) Reset() {
 	r.ready.Store(false)
 	r.readyAt.Store(nil)
 	r.lastPacketAt.Store(nil)
+	r.bytesTotal.Store(0)
+	r.frameNo.Store(0)
 	r.bytesBuckets[0].Store(0)
 	r.bytesBuckets[1].Store(0)
 	r.framesBuckets[0].Store(0)
 	r.framesBuckets[1].Store(0)
 	r.mu.Lock()
 	r.init = nil
+	r.codec = ""
+	r.width = 0
+	r.height = 0
+	r.frameRate = 0
+	r.lastCycleIdx = 0
+	for ch := range r.clients {
+		close(ch)
+		delete(r.clients, ch)
+	}
 	r.mu.Unlock()
+	r.clientCount.Store(0)
 }
 
 func (r *Hub) IsReceivingFrames() bool {
@@ -106,10 +118,14 @@ func (r *Hub) Subscribe() chan *Frame {
 
 func (r *Hub) Unsubscribe(ch chan *Frame) {
 	r.mu.Lock()
-	delete(r.clients, ch)
-	close(ch)
+	if _, ok := r.clients[ch]; ok {
+		delete(r.clients, ch)
+		close(ch)
+	}
 	r.mu.Unlock()
-	r.clientCount.Add(-1)
+	if r.clientCount.Load() > 0 {
+		r.clientCount.Add(-1)
+	}
 }
 
 func (r *Hub) Broadcast(data []byte, isKey bool) {

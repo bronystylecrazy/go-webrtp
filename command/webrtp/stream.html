@@ -63,6 +63,14 @@
             font-size: 0.95rem;
         }
 
+        .meta-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            margin-top: 6px;
+        }
+
         .viewer {
             position: relative;
             overflow: hidden;
@@ -97,6 +105,15 @@
 
         .status strong {
             color: var(--accent);
+            display: inline-block;
+            min-width: 6ch;
+            font-variant-numeric: tabular-nums;
+            font-feature-settings: "tnum" 1;
+            text-align: right;
+        }
+
+        #quality {
+            min-width: 10ch;
         }
 
         .controls {
@@ -116,6 +133,10 @@
             font: inherit;
         }
 
+        .mode-select {
+            max-width: min(46vw, 420px);
+        }
+
         @media (max-width: 900px) {
             .header {
                 top: 12px;
@@ -133,6 +154,12 @@
         <div>
             <h1 class="title" id="stream-title">Loading stream...</h1>
             <div class="meta" id="stream-meta">Resolving stream details</div>
+            <div class="meta-row">
+                <span class="meta">Available modes</span>
+                <select id="mode-select" class="quality-select mode-select">
+                    <option value="">Loading capabilities</option>
+                </select>
+            </div>
         </div>
         <div class="status" id="stream-status">
             <span><strong id="codec">-</strong> codec</span>
@@ -143,6 +170,12 @@
             <span><strong id="bytes">-</strong> rx/s</span>
             <span><strong id="frame-no">0</strong> frame</span>
         </div>
+        <label class="controls">
+            <span>Stream</span>
+            <select id="stream-select" class="quality-select">
+                <option value="">Loading...</option>
+            </select>
+        </label>
         <label class="controls">
             <span>Quality</span>
             <select id="quality-select" class="quality-select">
@@ -183,6 +216,11 @@
             this._lateFrameThreshold = 16;
             this._onready = null;
             this._didRenderFrame = false;
+            this._lastActivityAt = Date.now();
+            this._watchdogTimer = setInterval(() => this.checkHealth(), 1000);
+            this._frameOffset = 0;
+            this._lastRawFrameNo = 0;
+            this._lastDisplayFrameNo = 0;
 
             this.connect();
         }
@@ -192,6 +230,7 @@
             this.ws = new WebSocket(this.wsUrl);
             this.ws.binaryType = 'arraybuffer';
             this.ws.onopen = () => {
+                this._lastActivityAt = Date.now();
                 this._reconnectDelay = 1000;
             };
             this.ws.onmessage = (e) => this.onMessage(e);
@@ -212,6 +251,7 @@
             this._didRenderFrame = false;
             this._pendingDecode = 0;
             this._waitingForKeyframe = false;
+            this._lastRawFrameNo = 0;
             if (this.decoder && this.decoder.state !== 'closed') {
                 try { this.decoder.close(); } catch (_) {}
             }
@@ -230,6 +270,7 @@
 
         onMessage(e) {
             if (this._paused) return;
+            this._lastActivityAt = Date.now();
 
             if (!this.initDone) {
                 this.initDone = true;
@@ -244,6 +285,7 @@
             if (!this.decoder || this.decoder.state !== 'configured') return;
 
             const {frameNo, payload, isKey} = this.parseFrag(e.data);
+            const displayFrameNo = this.mapFrameNo(frameNo);
             const decodeQueue = Math.max(this.decoder.decodeQueueSize || 0, this._pendingDecode);
 
             if (this._waitingForKeyframe && !isKey) {
@@ -274,7 +316,7 @@
                 if (isKey) {
                     this._waitingForKeyframe = false;
                 }
-                if (this._oninfo) this._oninfo({frameNo});
+                if (this._oninfo) this._oninfo({frameNo: displayFrameNo});
             } catch (_) {
                 this.dropped++;
                 this._pendingDecode = Math.max(0, this._pendingDecode - 1);
@@ -282,6 +324,34 @@
                     this.makeDecoder(this.codec, this.desc);
                 }
             }
+        }
+
+        checkHealth() {
+            if (this._closed || !this.ws) return;
+            if (this.ws.readyState !== WebSocket.OPEN) return;
+            const idleMs = Date.now() - this._lastActivityAt;
+            const limitMs = this.initDone ? 3000 : 8000;
+            if (idleMs < limitMs) return;
+            this.ws.close();
+        }
+
+        setFrameBase(frameNo) {
+            const base = Math.max(0, Number(frameNo || 0));
+            this._frameOffset = base;
+            this._lastDisplayFrameNo = base;
+        }
+
+        mapFrameNo(rawFrameNo) {
+            const raw = Math.max(0, Number(rawFrameNo || 0));
+            if (this._lastRawFrameNo > 0 && raw > 0 && raw < this._lastRawFrameNo) {
+                this._frameOffset = Math.max(this._frameOffset, this._lastDisplayFrameNo);
+            }
+            this._lastRawFrameNo = raw;
+            const display = raw > 0 ? raw + this._frameOffset : this._lastDisplayFrameNo;
+            if (display > this._lastDisplayFrameNo) {
+                this._lastDisplayFrameNo = display;
+            }
+            return this._lastDisplayFrameNo;
         }
 
         parseInit(buf) {
@@ -391,6 +461,7 @@
             this._closed = true;
             this._paused = true;
             clearTimeout(this._reconnectTimer);
+            clearInterval(this._watchdogTimer);
             this.resetStreamState();
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
                 this.ws.close();
@@ -453,6 +524,24 @@
         }
     }
 
+    function streamSignature(message) {
+        return (message.streams || []).map((stream) => stream.name).join('|');
+    }
+
+    function applyStreamOptions(message, requestedName) {
+        const select = document.getElementById('stream-select');
+        const nextSignature = streamSignature(message);
+        if (select.dataset.signature !== nextSignature) {
+            const current = select.value;
+            const options = (message.streams || []).map((stream) => `<option value="${stream.name}">${stream.name}</option>`);
+            select.innerHTML = options.join('') || '<option value="">No streams</option>';
+            select.dataset.signature = nextSignature;
+            select.value = requestedName || current || '';
+        } else if (requestedName) {
+            select.value = requestedName;
+        }
+    }
+
     function selectedQuality(stream, requestedQuality) {
         const renditions = stream.renditions || [];
         if (!requestedQuality || renditions.length === 0) {
@@ -473,36 +562,132 @@
         return stream.stats.bitrateKbps || stream.bitrateKbps || 0;
     }
 
+    function selectedStats(stream, requestedQuality) {
+        const renditions = stream.renditions || [];
+        if (requestedQuality && renditions.length > 0) {
+            const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
+            if (match?.stats) return match.stats;
+        }
+        return stream.stats || {};
+    }
+
     function applyStream(stream, requestedQuality) {
+        const stats = selectedStats(stream, requestedQuality);
         document.getElementById('stream-title').textContent = stream.name;
         document.getElementById('stream-meta').textContent = `${stream.sourceType.toUpperCase()} · ${stream.url}`;
-        document.getElementById('codec').textContent = stream.stats.codec || stream.codec || '-';
-        document.getElementById('resolution').textContent = `${stream.stats.width || 0}x${stream.stats.height || 0}`;
+        document.getElementById('codec').textContent = stats.codec || stream.codec || '-';
+        document.getElementById('resolution').textContent = `${stats.width || 0}x${stats.height || 0}`;
         const liveBitrateKbps = selectedBitrate(stream, requestedQuality);
-        document.getElementById('framerate').textContent = Math.round(stream.stats.framerate || 0);
+        document.getElementById('framerate').textContent = Math.round(stats.framerate || 0);
         document.getElementById('bitrate').textContent = Math.round(liveBitrateKbps);
         document.getElementById('quality').textContent = selectedQuality(stream, requestedQuality);
         document.getElementById('bytes').textContent = formatRateFromKbps(liveBitrateKbps);
     }
 
+    function modeLabel(mode) {
+        const fps = (mode.fps || []).map((v) => Math.round(Number(v || 0))).filter(Boolean);
+        const fpsText = fps.length > 0 ? ` @ ${fps.join('/')}` : '';
+        return `${mode.width}x${mode.height}${fpsText} fps`;
+    }
+
+    function closestModeIndex(modes, target) {
+        if (!Array.isArray(modes) || modes.length === 0) return 0;
+        const width = Number(target?.width || 0);
+        const height = Number(target?.height || 0);
+        const fps = Number(target?.frameRate || target?.framerate || 0);
+        let bestIndex = 0;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < modes.length; i++) {
+            const mode = modes[i];
+            const modeWidth = Number(mode.width || 0);
+            const modeHeight = Number(mode.height || 0);
+            const modeFps = (mode.fps || []).map((v) => Number(v || 0));
+            const fpsScore = modeFps.length > 0 ? Math.min(...modeFps.map((v) => Math.abs(v - fps))) : 1000;
+            const score = Math.abs(modeWidth - width) + Math.abs(modeHeight - height) + fpsScore * 10;
+            if (score < bestScore) {
+                bestScore = score;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
+    }
+
+    function applyCapabilityOptions(capsResponse, target, lockedIndex = null) {
+        const select = document.getElementById('mode-select');
+        if (!capsResponse || capsResponse.sourceType !== 'usb') {
+            select.innerHTML = '<option value="">Modes unavailable for this source</option>';
+            select.disabled = true;
+            return;
+        }
+        const caps = capsResponse.capabilities;
+        const modes = Array.isArray(caps?.modes) ? caps.modes : [];
+        if (modes.length === 0) {
+            select.innerHTML = '<option value="">No modes reported</option>';
+            select.disabled = true;
+            return;
+        }
+        select.innerHTML = modes.map((mode, index) => `<option value="${index}">${modeLabel(mode)}</option>`).join('');
+        select.disabled = false;
+        if (lockedIndex !== null && lockedIndex >= 0 && lockedIndex < modes.length) {
+            select.value = String(lockedIndex);
+            return;
+        }
+        select.value = String(closestModeIndex(modes, target));
+    }
+
     async function main() {
-        const name = decodeURIComponent(location.pathname.split('/').pop() || '');
+        let activeName = decodeURIComponent(location.pathname.split('/').pop() || '');
         let activeQuality = new URLSearchParams(location.search).get('quality') || '';
         let pendingQuality = '';
+        let pendingName = '';
         const titleEl = document.getElementById('stream-title');
         const metaEl = document.getElementById('stream-meta');
+        const streamSelect = document.getElementById('stream-select');
         const qualitySelect = document.getElementById('quality-select');
         const videoA = document.getElementById('stream-video-a');
         const videoB = document.getElementById('stream-video-b');
+        let lastStatusMessage = {streams: []};
+        const capabilityCache = new Map();
+        let pendingModeIndex = null;
 
         const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-        const streamWsUrl = (quality) => {
+        const streamWsUrl = (name, quality) => {
             const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
             return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
         };
+        const loadCapabilities = async (streamName) => {
+            if (!streamName) return;
+            if (capabilityCache.has(streamName)) {
+                const stream = findStream(lastStatusMessage, streamName) || {};
+                applyCapabilityOptions(capabilityCache.get(streamName), stream, pendingModeIndex);
+                return;
+            }
+            try {
+                const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/capabilities`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const payload = await response.json();
+                capabilityCache.set(streamName, payload);
+                if ((pendingName || activeName) === streamName) {
+                    const stream = findStream(lastStatusMessage, streamName) || {};
+                    applyCapabilityOptions(payload, stream, pendingModeIndex);
+                }
+            } catch (error) {
+                const payload = {sourceType: '', error: error.message || String(error)};
+                capabilityCache.set(streamName, payload);
+                if ((pendingName || activeName) === streamName) {
+                    applyCapabilityOptions(payload, {});
+                }
+            }
+        };
         const bindInfo = (player) => player.onInfo((info) => {
             if (info.codec) document.getElementById('codec').textContent = info.codec;
-            if (info.frameNo !== undefined) document.getElementById('frame-no').textContent = info.frameNo;
+            if (info.frameNo !== undefined) {
+                const next = Math.max(displayedFrameNo, Number(info.frameNo || 0));
+                displayedFrameNo = next;
+                document.getElementById('frame-no').textContent = next;
+            }
         });
         const showVideo = (video) => {
             videoA.classList.toggle('is-hidden', video !== videoA);
@@ -510,14 +695,18 @@
         };
         let activeVideo = videoA;
         let standbyVideo = videoB;
-        let activePlayer = new StreamPlayer(streamWsUrl(activeQuality));
+        let displayedFrameNo = 0;
+        let activePlayer = new StreamPlayer(streamWsUrl(activeName, activeQuality));
         activePlayer.render(activeVideo);
         bindInfo(activePlayer);
         let pendingPlayer = null;
         let pendingSwapTimer = null;
         let swapToken = 0;
-        const setUrlQuality = (quality) => {
+        const setUrlState = (name, quality) => {
             const url = new URL(location.href);
+            const parts = url.pathname.split('/');
+            parts[parts.length - 1] = encodeURIComponent(name);
+            url.pathname = parts.join('/');
             if (quality) {
                 url.searchParams.set('quality', quality);
             } else {
@@ -525,11 +714,16 @@
             }
             history.replaceState(null, '', url);
         };
-        const swapQuality = (nextQuality) => {
+        const swapStream = (nextName, nextQuality) => {
             swapToken++;
             const token = swapToken;
             const nextVideo = standbyVideo;
-            const nextPlayer = new StreamPlayer(streamWsUrl(nextQuality));
+            const nextPlayer = new StreamPlayer(streamWsUrl(nextName, nextQuality));
+            if (nextName === activeName) {
+                nextPlayer.setFrameBase(displayedFrameNo);
+            } else {
+                nextPlayer.setFrameBase(0);
+            }
             nextPlayer.render(nextVideo);
             bindInfo(nextPlayer);
             nextPlayer.onReady(() => {
@@ -538,7 +732,10 @@
                     return;
                 }
                 const oldPlayer = activePlayer;
+                const nameChanged = nextName !== activeName;
+                activeName = nextName;
                 activeQuality = nextQuality;
+                pendingName = '';
                 pendingQuality = '';
                 activePlayer = nextPlayer;
                 pendingPlayer = null;
@@ -547,15 +744,23 @@
                 showVideo(nextVideo);
                 standbyVideo = activeVideo;
                 activeVideo = nextVideo;
+                if (nameChanged) {
+                    displayedFrameNo = 0;
+                    document.getElementById('frame-no').textContent = '0';
+                }
+                streamSelect.disabled = false;
+                streamSelect.value = activeName;
                 qualitySelect.disabled = false;
                 qualitySelect.value = activeQuality;
-                setUrlQuality(activeQuality);
+                setUrlState(activeName, activeQuality);
+                loadCapabilities(activeName);
                 setTimeout(() => oldPlayer.close(), 120);
             });
             if (pendingPlayer) {
                 pendingPlayer.close();
             }
             pendingPlayer = nextPlayer;
+            streamSelect.disabled = true;
             qualitySelect.disabled = true;
             clearTimeout(pendingSwapTimer);
             pendingSwapTimer = setTimeout(() => {
@@ -566,9 +771,13 @@
                     pendingPlayer.close();
                     pendingPlayer = null;
                 }
+                pendingName = '';
                 pendingQuality = '';
+                streamSelect.disabled = false;
+                streamSelect.value = activeName;
                 qualitySelect.disabled = false;
                 qualitySelect.value = activeQuality;
+                loadCapabilities(activeName);
             }, 10000);
         };
         window.addEventListener('beforeunload', () => {
@@ -582,10 +791,62 @@
                 return;
             }
             pendingQuality = nextQuality;
-            swapQuality(nextQuality);
+            swapStream(activeName, nextQuality);
         };
+        const applySelectedStream = () => {
+            const nextName = streamSelect.value;
+            if (!nextName || nextName === activeName) {
+                return;
+            }
+            const nextStream = findStream(lastStatusMessage, nextName);
+            let nextQuality = '';
+            if (nextStream && activeQuality && (nextStream.renditions || []).some((item) => item.name === activeQuality)) {
+                nextQuality = activeQuality;
+            }
+            pendingName = nextName;
+            pendingQuality = nextQuality;
+            swapStream(nextName, nextQuality);
+        };
+        const applySelectedMode = async () => {
+            const streamName = pendingName || activeName;
+            const capsResponse = capabilityCache.get(streamName);
+            const modes = capsResponse?.capabilities?.modes || [];
+            const selectedIndex = Number(document.getElementById('mode-select').value);
+            const selectedMode = modes[selectedIndex];
+            if (!selectedMode) {
+                return;
+            }
+            try {
+                pendingModeIndex = selectedIndex;
+                document.getElementById('mode-select').disabled = true;
+                const fps = Array.isArray(selectedMode.fps) && selectedMode.fps.length > 0 ? Number(selectedMode.fps[selectedMode.fps.length - 1]) : null;
+                const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/mode`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        width: Number(selectedMode.width || 0),
+                        height: Number(selectedMode.height || 0),
+                        frameRate: fps || null,
+                    }),
+                });
+                if (!response.ok) {
+                    throw new Error(await response.text() || `HTTP ${response.status}`);
+                }
+                capabilityCache.delete(streamName);
+                pendingName = streamName;
+                pendingQuality = activeQuality;
+                swapStream(streamName, activeQuality);
+            } catch (error) {
+                metaEl.textContent = error.message || String(error);
+                pendingModeIndex = null;
+                document.getElementById('mode-select').disabled = false;
+            }
+        };
+        streamSelect.addEventListener('change', applySelectedStream);
+        streamSelect.addEventListener('input', applySelectedStream);
         qualitySelect.addEventListener('change', applySelectedQuality);
         qualitySelect.addEventListener('input', applySelectedQuality);
+        document.getElementById('mode-select').addEventListener('change', applySelectedMode);
 
         let infoWs = null;
         let reconnectTimer = null;
@@ -598,14 +859,25 @@
             infoWs.onmessage = (event) => {
                 try {
                     const message = JSON.parse(event.data);
-                    const stream = findStream(message, name);
+                    lastStatusMessage = message;
+                    applyStreamOptions(message, pendingName || activeName);
+                    const stream = findStream(message, pendingName || activeName);
                     if (!stream) {
                         titleEl.textContent = 'Stream not found';
                         metaEl.textContent = 'This stream is not currently available';
                         return;
                     }
                     applyQualityOptions(stream, pendingQuality || activeQuality);
-                    applyStream(stream, activeQuality);
+                    applyStream(stream, pendingQuality || activeQuality);
+                    if (pendingModeIndex !== null) {
+                        const matchesPending = Number(stream.width || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.width) || 0)
+                            && Number(stream.height || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.height) || 0);
+                        if (matchesPending) {
+                            pendingModeIndex = null;
+                            document.getElementById('mode-select').disabled = false;
+                        }
+                    }
+                    loadCapabilities(pendingName || activeName);
                 } catch (err) {
                     metaEl.textContent = err.message || String(err);
                 }

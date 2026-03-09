@@ -22,8 +22,10 @@ const (
 
 	v4l2CidMpegVideoGopSize       = 0x009909cb
 	v4l2CidMpegVideoH264IDRPeriod = 0x00990a6a
+	v4l2CidMpegVideoForceKeyFrame = 0x009909e5
 
 	vidiocGCtrl = 0xc008561b
+	vidiocSCtrl = 0xc008561c
 	vidiocGFmt  = 0xc0d05604
 	vidiocSFmt  = 0xc0d05605
 )
@@ -68,6 +70,20 @@ func (r *usbConn) Close() {
 	}
 }
 
+func (r *usbConn) ForceNextKeyFrame() error {
+	if r.file == nil {
+		return fmt.Errorf("usb capture is not active")
+	}
+	ctrl := &v4l2Control{
+		Id:    v4l2CidMpegVideoForceKeyFrame,
+		Value: 1,
+	}
+	if err := usbIoctl(r.file.Fd(), vidiocSCtrl, unsafe.Pointer(ctrl)); err != nil {
+		return fmt.Errorf("V4L2 force keyframe: %w", err)
+	}
+	return nil
+}
+
 func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	device := strings.TrimSpace(r.cfg.Device)
 	if device == "" {
@@ -99,7 +115,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 
 	usbCtx, cancel := context.WithCancel(ctx)
 	conn := &usbConn{file: file, cancel: cancel}
-	handler := &videoHandler{hub: r.hub, logger: r.logger}
+	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 
 	r.logger.Printf("USB stream active (%s, codec=%s)", device, strings.ToUpper(codec))
 

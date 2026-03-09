@@ -39,6 +39,8 @@ type StreamApiRequest struct {
 	RtspUrl     string       `json:"rtspUrl"`
 	Device      string       `json:"device"`
 	Codec       string       `json:"codec"`
+	Width       *int         `json:"width"`
+	Height      *int         `json:"height"`
 	FrameRate   *float64     `json:"frameRate"`
 	BitrateKbps *int         `json:"bitrateKbps"`
 	OnDemand    bool         `json:"onDemand"`
@@ -46,10 +48,11 @@ type StreamApiRequest struct {
 }
 
 type RenditionApiResponse struct {
-	Name        string `json:"name"`
-	BitrateKbps int    `json:"bitrateKbps"`
-	WsPath      string `json:"wsPath"`
-	Stats       *webrtp.StreamStats `json:"stats,omitempty"`
+	Name        string               `json:"name"`
+	BitrateKbps int                  `json:"bitrateKbps"`
+	OnDemand    bool                 `json:"onDemand"`
+	WsPath      string               `json:"wsPath"`
+	Stats       *webrtp.StreamStats  `json:"stats,omitempty"`
 }
 
 type StreamApiResponse struct {
@@ -59,6 +62,8 @@ type StreamApiResponse struct {
 	RtspUrl         string                  `json:"rtspUrl,omitempty"`
 	Device          string                  `json:"device,omitempty"`
 	Codec           string                  `json:"codec,omitempty"`
+	Width           *int                    `json:"width,omitempty"`
+	Height          *int                    `json:"height,omitempty"`
 	FrameRate       *float64                `json:"frameRate,omitempty"`
 	BitrateKbps     *int                    `json:"bitrateKbps,omitempty"`
 	OnDemand        bool                    `json:"onDemand,omitempty"`
@@ -67,6 +72,13 @@ type StreamApiResponse struct {
 	Stats           *webrtp.StreamStats     `json:"stats"`
 	Renditions      []*RenditionApiResponse `json:"renditions,omitempty"`
 	ActiveRendition string                  `json:"activeRendition,omitempty"`
+}
+
+type StreamCapabilitiesResponse struct {
+	Name         string                         `json:"name"`
+	SourceType   string                         `json:"sourceType"`
+	Device       string                         `json:"device,omitempty"`
+	Capabilities *webrtp.UsbDeviceCapabilities `json:"capabilities,omitempty"`
 }
 
 func StreamManagerNew(configPath string, cfg *Config) (*StreamManager, error) {
@@ -210,6 +222,29 @@ func (r *StreamManager) StreamStatus(name string) (*StreamApiResponse, bool) {
 	return nil, false
 }
 
+func (r *StreamManager) StreamCapabilities(name string) (*StreamCapabilitiesResponse, bool, error) {
+	r.mu.RLock()
+	group, ok := r.groupsByName[name]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, false, nil
+	}
+	resp := &StreamCapabilitiesResponse{
+		Name:       group.Name,
+		SourceType: StreamUpstreamSourceType(group.Upstream),
+		Device:     group.Upstream.Device,
+	}
+	if resp.SourceType != "usb" {
+		return resp, true, nil
+	}
+	caps, err := webrtp.UsbDeviceCapabilitiesGet(group.Upstream.Device)
+	if err != nil {
+		return nil, true, err
+	}
+	resp.Capabilities = caps
+	return resp, true, nil
+}
+
 func (r *StreamManager) StreamCreate(req *StreamApiRequest) (*StreamApiResponse, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -282,6 +317,77 @@ func (r *StreamManager) StreamUpdate(name string, req *StreamApiRequest) (*Strea
 		return nil, err
 	}
 
+	r.config.Upstreams[index] = upstream
+	r.groups[index] = group
+	delete(r.groupsByName, name)
+	r.groupsByName[group.Name] = group
+	for _, stream := range oldGroup.Streams {
+		delete(r.streamsByName, stream.Name)
+	}
+	for _, stream := range group.Streams {
+		r.streamsByName[stream.Name] = stream
+	}
+
+	if err := r.configSave(); err != nil {
+		r.config.Upstreams[index] = oldUpstream
+		r.groups[index] = oldGroup
+		delete(r.groupsByName, group.Name)
+		r.groupsByName[oldGroup.Name] = oldGroup
+		for _, stream := range group.Streams {
+			delete(r.streamsByName, stream.Name)
+			_ = stream.Stop()
+		}
+		for _, stream := range oldGroup.Streams {
+			r.streamsByName[stream.Name] = stream
+		}
+		return nil, err
+	}
+
+	for _, stream := range oldGroup.Streams {
+		_ = stream.Stop()
+	}
+	return r.streamResponse(index, group), nil
+}
+
+func (r *StreamManager) StreamModeUpdate(name string, req *ModeRequest) (*StreamApiResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	index := -1
+	for idx, group := range r.groups {
+		if group.Name == name {
+			index = idx
+			break
+		}
+	}
+	if index < 0 {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+	if req.Width <= 0 || req.Height <= 0 {
+		return nil, fmt.Errorf("mode update requires positive width and height")
+	}
+
+	oldUpstream := r.config.Upstreams[index]
+	upstream := &Upstream{
+		Name:        oldUpstream.Name,
+		SourceType:  oldUpstream.SourceType,
+		RtspUrl:     oldUpstream.RtspUrl,
+		Device:      oldUpstream.Device,
+		Codec:       oldUpstream.Codec,
+		Width:       &req.Width,
+		Height:      &req.Height,
+		FrameRate:   req.FrameRate,
+		BitrateKbps: oldUpstream.BitrateKbps,
+		OnDemand:    oldUpstream.OnDemand,
+		Renditions:  oldUpstream.Renditions,
+	}
+
+	group, err := r.streamGroupCreate(index, upstream)
+	if err != nil {
+		return nil, err
+	}
+
+	oldGroup := r.groups[index]
 	r.config.Upstreams[index] = upstream
 	r.groups[index] = group
 	delete(r.groupsByName, name)
@@ -444,6 +550,8 @@ func (r *StreamManager) streamCreate(groupName, renditionName string, upstream *
 		Rtsp:        upstream.RtspUrl,
 		Device:      upstream.Device,
 		Codec:       upstream.Codec,
+		Width:       valueOrZero(upstream.Width),
+		Height:      valueOrZero(upstream.Height),
 		FrameRate:   frameRate,
 		BitrateKbps: bitrateKbps,
 		Logger:      logger,
@@ -492,6 +600,8 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 		RtspUrl:         group.Upstream.RtspUrl,
 		Device:          group.Upstream.Device,
 		Codec:           group.Upstream.Codec,
+		Width:           group.Upstream.Width,
+		Height:          group.Upstream.Height,
 		FrameRate:       group.Upstream.FrameRate,
 		BitrateKbps:     group.Upstream.BitrateKbps,
 		OnDemand:        group.Upstream.OnDemand,
@@ -515,6 +625,7 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 			resp.Renditions = append(resp.Renditions, &RenditionApiResponse{
 				Name:        stream.RenditionName,
 				BitrateKbps: bitrate,
+				OnDemand:    stream.OnDemand,
 				WsPath:      fmt.Sprintf("/stream/%s", stream.Name),
 				Stats:       &stats,
 			})
@@ -607,6 +718,8 @@ func StreamRequestUpstream(req *StreamApiRequest) (*Upstream, error) {
 		RtspUrl:     req.RtspUrl,
 		Device:      req.Device,
 		Codec:       req.Codec,
+		Width:       req.Width,
+		Height:      req.Height,
 		FrameRate:   req.FrameRate,
 		BitrateKbps: req.BitrateKbps,
 		OnDemand:    req.OnDemand,
@@ -635,15 +748,21 @@ func StreamUpstreamWithRendition(upstream *Upstream, rendition *Rendition) *Upst
 	name := StreamUpstreamName(0, upstream)
 	sourceType := StreamUpstreamSourceType(upstream)
 	bitrate := rendition.BitrateKbps
+	onDemand := upstream.OnDemand
+	if rendition.OnDemand != nil {
+		onDemand = *rendition.OnDemand
+	}
 	return &Upstream{
 		Name:        &name,
 		SourceType:  &sourceType,
 		RtspUrl:     upstream.RtspUrl,
 		Device:      upstream.Device,
 		Codec:       upstream.Codec,
+		Width:       upstream.Width,
+		Height:      upstream.Height,
 		FrameRate:   upstream.FrameRate,
 		BitrateKbps: &bitrate,
-		OnDemand:    upstream.OnDemand,
+		OnDemand:    onDemand,
 	}
 }
 
@@ -651,4 +770,11 @@ func StreamResponsesSort(items []*StreamApiResponse) {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Index < items[j].Index
 	})
+}
+
+func valueOrZero(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
 }

@@ -39,7 +39,7 @@ func (r *Instance) connectRtsp(ctx context.Context) (*rtspConn, error) {
 		return nil, fmt.Errorf("RTSP describe: %w", err)
 	}
 	r.logger.Printf("found %d media track(s)", len(desc.Medias))
-	h := &videoHandler{hub: r.hub, logger: r.logger}
+	h := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 	if err := r.setupCodecHandler(c, desc, h); err != nil {
 		c.Close()
 		cancel()

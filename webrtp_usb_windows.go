@@ -68,7 +68,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 
 	usbCtx, cancel := context.WithCancel(ctx)
 	conn := &usbConn{cancel: cancel}
-	handler := &videoHandler{hub: r.hub, logger: r.logger}
+	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 	handle := usbRegistrySeq.Add(1)
 	usbRegistry.Store(handle, &usbRegistryEntry{
 		handler: handler,

@@ -40,6 +40,9 @@ func (r *Instance) Connect() error {
 
 		conn, err := r.connectSource(ctx)
 		if err != nil {
+			if recorder := r.currentRecorder(); recorder != nil {
+				recorder.OnOffline()
+			}
 			if r.stop.Load() {
 				cancel()
 				return nil
@@ -57,6 +60,9 @@ func (r *Instance) Connect() error {
 		for {
 			select {
 			case <-ctx.Done():
+				if recorder := r.currentRecorder(); recorder != nil {
+					recorder.OnOffline()
+				}
 				if r.stop.Load() {
 					return nil
 				}
@@ -64,6 +70,9 @@ func (r *Instance) Connect() error {
 				goto reconnect
 			case <-ticker.C:
 				if r.hub.ready.Load() && !r.hub.IsReceivingFrames() {
+					if recorder := r.currentRecorder(); recorder != nil {
+						recorder.OnOffline()
+					}
 					r.logger.Printf("no frame received for 1s, reconnecting")
 					cancel()
 					goto reconnect
@@ -83,5 +92,8 @@ func (r *Instance) Stop() error {
 		r.conn.Close()
 	}
 	r.hub.Reset()
+	if recorder := r.currentRecorder(); recorder != nil {
+		_ = recorder.Stop()
+	}
 	return nil
 }

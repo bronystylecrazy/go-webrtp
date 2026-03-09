@@ -97,6 +97,26 @@
 
         .status-ready { color: var(--good); }
         .status-waiting { color: var(--warn); }
+        .recording-on { color: var(--good); }
+        .recording-off { color: var(--muted); }
+        .record-btn {
+            border: 1px solid var(--line);
+            background: rgba(15, 23, 42, 0.9);
+            color: var(--text);
+            border-radius: 999px;
+            padding: 6px 10px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .record-btn:hover {
+            border-color: rgba(56, 189, 248, 0.45);
+        }
+
+        .record-btn:disabled {
+            opacity: 0.55;
+            cursor: default;
+        }
 
         .empty {
             padding: 24px;
@@ -138,6 +158,9 @@
                     <th>Bandwidth</th>
                     <th>Frames</th>
                     <th>Clients</th>
+                    <th>Recording</th>
+                    <th>Recorded</th>
+                    <th>Action</th>
                     <th>Uptime</th>
                 </tr>
             </thead>
@@ -162,6 +185,48 @@
     }
 
     let allRows = [];
+    const pendingActions = new Set();
+
+    function splitStreamName(name) {
+        const idx = String(name || '').indexOf('/');
+        if (idx < 0) {
+            return {stream: name || '', quality: ''};
+        }
+        return {
+            stream: name.slice(0, idx),
+            quality: name.slice(idx + 1),
+        };
+    }
+
+    async function toggleRecording(name, shouldStart) {
+        if (!name || pendingActions.has(name)) return;
+        pendingActions.add(name);
+        renderRows();
+
+        const {stream, quality} = splitStreamName(name);
+        const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
+        const path = shouldStart
+            ? `/api/streams/${encodeURIComponent(stream)}/record/start${query}`
+            : `/api/streams/${encodeURIComponent(stream)}/record/stop${query}`;
+
+        try {
+            const response = await fetch(path, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: shouldStart ? JSON.stringify({offlineMode: 'pause'}) : undefined,
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(text || `HTTP ${response.status}`);
+            }
+        } catch (error) {
+            console.error('recording action failed', error);
+            alert(error.message || String(error));
+        } finally {
+            pendingActions.delete(name);
+            renderRows();
+        }
+    }
 
     function renderRows() {
         const tbody = document.getElementById('rows');
@@ -185,9 +250,26 @@
                 <td>${formatBytes(row.bandwidthBytes || 0)}</td>
                 <td>${row.frames || 0}</td>
                 <td>${row.clients || 0}</td>
+                <td class="${row.recording ? 'recording-on' : 'recording-off'}">${row.recording ? `ON${row.recordingMode ? ` (${row.recordingMode})` : ''}` : 'OFF'}</td>
+                <td title="${row.recordingFile || ''}">${formatBytes(row.recordingBytes || 0)}${row.recordingOfflineMode ? ` / ${row.recordingOfflineMode}` : ''}</td>
+                <td>
+                    <button
+                        class="record-btn"
+                        data-name="${row.name}"
+                        data-action="${row.recording ? 'stop' : 'start'}"
+                        ${pendingActions.has(row.name) ? 'disabled' : ''}>
+                        ${pendingActions.has(row.name) ? 'Working...' : (row.recording ? 'Stop' : 'Record')}
+                    </button>
+                </td>
                 <td>${row.uptime || '-'}</td>
             </tr>
         `).join('');
+
+        tbody.querySelectorAll('.record-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                toggleRecording(button.dataset.name || '', button.dataset.action === 'start');
+            });
+        });
     }
 
     function main() {

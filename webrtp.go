@@ -3,8 +3,10 @@ package webrtp
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -19,6 +21,8 @@ type Config struct {
 	Rtsp            string
 	Device          string
 	Codec           string
+	Width           int
+	Height          int
 	FrameRate       float64
 	BitrateKbps     int
 	Logger          Logger
@@ -34,6 +38,9 @@ type Instance struct {
 	conn   sourceConn
 	cancel context.CancelFunc
 	stop   atomic.Bool
+
+	recorderMu sync.Mutex
+	recorder   *Recorder
 }
 
 type stdLogger struct{}
@@ -68,6 +75,8 @@ func Init(cfg *Config) *Instance {
 			Rtsp:            cfg.Rtsp,
 			Device:          cfg.Device,
 			Codec:           strings.ToLower(strings.TrimSpace(cfg.Codec)),
+			Width:           cfg.Width,
+			Height:          cfg.Height,
 			FrameRate:       cfg.FrameRate,
 			BitrateKbps:     cfg.BitrateKbps,
 			Logger:          logger,
@@ -75,8 +84,9 @@ func Init(cfg *Config) *Instance {
 			ReadBufferSize:  readBuf,
 			WriteBufferSize: writeBuf,
 		},
-		hub:    NewHub(),
-		logger: logger,
+		hub:      NewHub(),
+		logger:   logger,
+		recorder: NewRecorder(logger),
 	}
 }
 
@@ -86,4 +96,77 @@ func (r *Instance) InstanceReady() bool {
 
 func (r *Instance) GetHub() *Hub {
 	return r.hub
+}
+
+func (r *Instance) StartRecording(path, mode, offlineMode string) error {
+	r.recorderMu.Lock()
+	defer r.recorderMu.Unlock()
+
+	explicitMode := strings.TrimSpace(mode) != ""
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		if requester, ok := r.conn.(interface{ ForceNextKeyFrame() error }); ok && requester != nil {
+			mode = "exact"
+		} else {
+			mode = "instant"
+		}
+	}
+	if r.recorder == nil {
+		r.recorder = NewRecorder(r.logger)
+	}
+	startWithMode := func(selectedMode string) error {
+		if err := r.recorder.Start(path, selectedMode, offlineMode); err != nil {
+			return err
+		}
+		if initData := r.hub.GetInit(); initData != nil {
+			r.recorder.SetInit(initData)
+		}
+		return nil
+	}
+	if err := startWithMode(mode); err != nil {
+		return err
+	}
+	if mode == "exact" {
+		requester, ok := r.conn.(interface{ ForceNextKeyFrame() error })
+		if !ok {
+			_ = r.recorder.Stop()
+			if explicitMode {
+				return fmt.Errorf("recording mode exact is only supported for sources that can force a keyframe")
+			}
+			return startWithMode("instant")
+		}
+		if err := requester.ForceNextKeyFrame(); err != nil {
+			_ = r.recorder.Stop()
+			if explicitMode {
+				return fmt.Errorf("recording mode exact: %w", err)
+			}
+			r.logger.Printf("recording exact unavailable, falling back to instant: %v", err)
+			return startWithMode("instant")
+		}
+	}
+	return nil
+}
+
+func (r *Instance) StopRecording() error {
+	r.recorderMu.Lock()
+	defer r.recorderMu.Unlock()
+	if r.recorder == nil {
+		return nil
+	}
+	return r.recorder.Stop()
+}
+
+func (r *Instance) RecordingStatus() RecordingStatus {
+	r.recorderMu.Lock()
+	defer r.recorderMu.Unlock()
+	if r.recorder == nil {
+		return RecordingStatus{}
+	}
+	return r.recorder.Status()
+}
+
+func (r *Instance) currentRecorder() *Recorder {
+	r.recorderMu.Lock()
+	defer r.recorderMu.Unlock()
+	return r.recorder
 }

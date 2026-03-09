@@ -13,14 +13,17 @@ typedef void *WebrtpUsbMacCaptureRef;
 extern void WebrtpUsbMacPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
 extern void WebrtpUsbMacError(uintptr_t handle, char *msg);
 
-WebrtpUsbMacCaptureRef WebrtpUsbMacCaptureStart(const char *device, const char *codec, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
+WebrtpUsbMacCaptureRef WebrtpUsbMacCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
 void WebrtpUsbMacCaptureStop(WebrtpUsbMacCaptureRef ref);
+void WebrtpUsbMacCaptureForceKeyFrame(WebrtpUsbMacCaptureRef ref);
 char *WebrtpUsbMacDeviceList(char **errOut);
+char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut);
 */
 import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -57,6 +60,14 @@ func (r *usbConn) Close() {
 	})
 }
 
+func (r *usbConn) ForceNextKeyFrame() error {
+	if r.ref == nil {
+		return fmt.Errorf("usb capture is not active")
+	}
+	C.WebrtpUsbMacCaptureForceKeyFrame(r.ref)
+	return nil
+}
+
 func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	device := strings.TrimSpace(r.cfg.Device)
 	if device == "" {
@@ -71,7 +82,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 
 	usbCtx, cancel := context.WithCancel(ctx)
 	conn := &usbConn{cancel: cancel}
-	handler := &videoHandler{hub: r.hub, logger: r.logger}
+	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 	handle := usbRegistrySeq.Add(1)
 	usbRegistry.Store(handle, &usbRegistryEntry{
 		handler: handler,
@@ -86,7 +97,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	defer C.free(unsafe.Pointer(cCodec))
 
 	var cErr *C.char
-	ref := C.WebrtpUsbMacCaptureStart(cDevice, cCodec, C.double(fps), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
+	ref := C.WebrtpUsbMacCaptureStart(cDevice, cCodec, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(fps), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
 	if ref == nil {
 		usbRegistry.Delete(handle)
 		cancel()
@@ -188,4 +199,26 @@ func UsbDeviceList() ([]*UsbDevice, error) {
 		return 1
 	})
 	return devices, nil
+}
+
+func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
+	cDevice := C.CString(device)
+	defer C.free(unsafe.Pointer(cDevice))
+
+	var cErr *C.char
+	result := C.WebrtpUsbMacDeviceCapabilities(cDevice, &cErr)
+	if result == nil {
+		if cErr != nil {
+			defer C.free(unsafe.Pointer(cErr))
+			return nil, fmt.Errorf("usb capabilities: %s", C.GoString(cErr))
+		}
+		return nil, fmt.Errorf("usb capabilities: unknown error")
+	}
+	defer C.free(unsafe.Pointer(result))
+
+	caps := &UsbDeviceCapabilities{}
+	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
+		return nil, fmt.Errorf("parse usb capabilities: %w", err)
+	}
+	return caps, nil
 }
