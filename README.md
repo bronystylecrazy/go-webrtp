@@ -52,9 +52,11 @@ telemetryServiceName: streamer1     # Optional: OTEL service name (default: "web
 telemetryEndpoint: "localhost:4317" # Optional: OTEL gRPC endpoint for pushing metrics
 upstreams:
   - name: camera1
+    enabled: true
     rtspUrl: rtsp://192.168.1.100:554/stream
   - name: usbCamera
     sourceType: usb
+    enabled: true
     device: default
     codec: h264
     onDemand: true
@@ -65,11 +67,30 @@ upstreams:
         bitrateKbps: 900
       - name: high
         bitrateKbps: 1600
+  - name: demoLoop
+    sourceType: file
+    enabled: true
+    path: ./test.mkv
+    onDemand: true
 ```
 
-`sourceType` defaults to `rtsp`. For USB sources:
+`sourceType` defaults to `rtsp`.
+
+For file sources:
+
+- `path` is required and can point to a single video file or a directory
+- `enabled` is optional and defaults to `true`; disabled streams stay in config and API results but are not playable
+- raw `.h264` / `.264` files are streamed directly without `ffmpeg`
+- for raw `.h264` / `.264`, set `frameRate` to control playback pacing
+- when `path` is a directory, supported files are sorted by name and looped continuously
+- file sources are transcoded to H264 with `ffmpeg`, so `ffmpeg` and `ffprobe` must be available on `PATH`
+- `width`, `height`, `frameRate`, and `bitrateKbps` are optional output controls for the mock stream
+- `onDemand` is optional; when `true`, playback starts on first viewer and stops a few seconds after the last viewer disconnects
+
+For USB sources:
 
 - `device` accepts `default`, the macOS camera name, or the macOS device unique ID
+- `enabled` is optional and defaults to `true`
 - `codec` must be `h264` or `h265`
 - `frameRate` is optional
 - `bitrateKbps` is optional
@@ -120,6 +141,7 @@ Example request body:
 {
   "name": "camera2",
   "sourceType": "rtsp",
+  "enabled": true,
   "rtspUrl": "rtsp://192.168.1.101:554/stream"
 }
 ```
@@ -130,6 +152,7 @@ USB example:
 {
   "name": "usbCamera",
   "sourceType": "usb",
+  "enabled": true,
   "device": "default",
   "codec": "h264",
   "onDemand": true,
@@ -138,6 +161,18 @@ USB example:
     {"name": "mid", "bitrateKbps": 900},
     {"name": "high", "bitrateKbps": 1600}
   ]
+}
+```
+
+File example:
+
+```json
+{
+  "name": "demoLoop",
+  "sourceType": "file",
+  "enabled": true,
+  "path": "./test.mkv",
+  "onDemand": true
 }
 ```
 

@@ -45,40 +45,56 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 		}
 	}
 
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := conn.WriteMessage(websocket.BinaryMessage, initData); err != nil {
-		return
+	initData, startupFrames, ch := r.hub.SubscribeWithStartupSnapshot()
+	var startupFrameNo uint64
+	for _, startupFrame := range startupFrames {
+		if startupFrame != nil && startupFrame.FrameNo > startupFrameNo {
+			startupFrameNo = startupFrame.FrameNo
+		}
 	}
 
-	ch := r.hub.Subscribe()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.WriteMessage(websocket.BinaryMessage, initData); err != nil {
+		r.hub.Unsubscribe(ch)
+		return
+	}
+	for _, startupFrame := range startupFrames {
+		if startupFrame == nil {
+			continue
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
+		if err := conn.WriteMessage(websocket.BinaryMessage, startupFrame.Data); err != nil {
+			r.hub.Unsubscribe(ch)
+			return
+		}
+	}
 	defer func() {
 		r.hub.Unsubscribe(ch)
 		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 	}()
 
+	waitForResumeKeyframe := false
+	expectedNextFrameNo := startupFrameNo + 1
 	for frame := range ch {
 		if frame == nil {
 			continue
 		}
-		selected := frame
-		for {
-			select {
-			case next, ok := <-ch:
-				if !ok {
-					return
-				}
-				if next == nil {
-					continue
-				}
-				selected = next
-			default:
-				goto writeFrame
-			}
+		if frame.FrameNo <= startupFrameNo {
+			continue
 		}
-	writeFrame:
+		if expectedNextFrameNo > 0 && frame.FrameNo > expectedNextFrameNo {
+			waitForResumeKeyframe = true
+		}
+		if waitForResumeKeyframe {
+			if !frame.IsKey {
+				continue
+			}
+			waitForResumeKeyframe = false
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
-		if err := conn.WriteMessage(websocket.BinaryMessage, selected.Data); err != nil {
+		if err := conn.WriteMessage(websocket.BinaryMessage, frame.Data); err != nil {
 			return
 		}
+		expectedNextFrameNo = frame.FrameNo + 1
 	}
 }

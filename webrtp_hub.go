@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
+const subscriberQueueSize = 256
+
 type Frame struct {
+	FrameNo uint64
 	Data  []byte
 	IsKey bool
 }
@@ -16,6 +19,7 @@ type Hub struct {
 	mu            sync.RWMutex
 	clients       map[chan *Frame]struct{}
 	init          []byte
+	startupFrames []*Frame
 	bytesTotal    atomic.Uint64
 	bytesBuckets  [2]*atomic.Uint64
 	framesBuckets [2]*atomic.Uint64
@@ -65,6 +69,7 @@ func (r *Hub) Reset() {
 	r.framesBuckets[1].Store(0)
 	r.mu.Lock()
 	r.init = nil
+	r.startupFrames = nil
 	r.codec = ""
 	r.width = 0
 	r.height = 0
@@ -107,8 +112,51 @@ func (r *Hub) GetInit() []byte {
 	return r.init
 }
 
+func (r *Hub) GetStartupSnapshot() ([]byte, []*Frame) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return copyStartupSnapshotLocked(r)
+}
+
+func (r *Hub) SubscribeWithStartupSnapshot() ([]byte, []*Frame, chan *Frame) {
+	ch := make(chan *Frame, subscriberQueueSize)
+	r.mu.Lock()
+	initData, frames := copyStartupSnapshotLocked(r)
+	r.clients[ch] = struct{}{}
+	r.mu.Unlock()
+	r.clientCount.Add(1)
+	return initData, frames, ch
+}
+
+func copyStartupSnapshotLocked(r *Hub) ([]byte, []*Frame) {
+	var initData []byte
+	if len(r.init) > 0 {
+		initData = make([]byte, len(r.init))
+		copy(initData, r.init)
+	}
+
+	if len(r.startupFrames) == 0 {
+		return initData, nil
+	}
+
+	frames := make([]*Frame, 0, len(r.startupFrames))
+	for _, src := range r.startupFrames {
+		if src == nil {
+			continue
+		}
+		frame := &Frame{
+			FrameNo: src.FrameNo,
+			Data:    make([]byte, len(src.Data)),
+			IsKey:   src.IsKey,
+		}
+		copy(frame.Data, src.Data)
+		frames = append(frames, frame)
+	}
+	return initData, frames
+}
+
 func (r *Hub) Subscribe() chan *Frame {
-	ch := make(chan *Frame, 2)
+	ch := make(chan *Frame, subscriberQueueSize)
 	r.mu.Lock()
 	r.clients[ch] = struct{}{}
 	r.mu.Unlock()
@@ -153,12 +201,23 @@ func (r *Hub) Broadcast(data []byte, isKey bool) {
 	binary.BigEndian.PutUint64(frameData[:8], frameNo)
 	copy(frameData[8:], data)
 	frame := &Frame{
-		Data:  frameData,
-		IsKey: isKey,
+		FrameNo: frameNo,
+		Data:    frameData,
+		IsKey:   isKey,
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	if isKey {
+		r.startupFrames = r.startupFrames[:0]
+	}
+	cachedFrame := &Frame{
+		FrameNo: frame.FrameNo,
+		Data:    make([]byte, len(frame.Data)),
+		IsKey:   frame.IsKey,
+	}
+	copy(cachedFrame.Data, frame.Data)
+	r.startupFrames = append(r.startupFrames, cachedFrame)
+	defer r.mu.Unlock()
 	for ch := range r.clients {
 		select {
 		case ch <- frame:

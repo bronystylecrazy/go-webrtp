@@ -53,6 +53,10 @@ func (r *Instance) Connect() error {
 			continue
 		}
 		r.conn = conn
+		var doneCh <-chan struct{}
+		if doneConn, ok := conn.(interface{ Done() <-chan struct{} }); ok {
+			doneCh = doneConn.Done()
+		}
 
 		// Wait for connection to drop or frame timeout
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -67,6 +71,16 @@ func (r *Instance) Connect() error {
 					return nil
 				}
 				r.logger.Printf("source connection dropped, reconnecting")
+				goto reconnect
+			case <-doneCh:
+				if recorder := r.currentRecorder(); recorder != nil {
+					recorder.OnOffline()
+				}
+				if r.stop.Load() {
+					return nil
+				}
+				r.logger.Printf("source process exited, reconnecting")
+				cancel()
 				goto reconnect
 			case <-ticker.C:
 				if r.hub.ready.Load() && !r.hub.IsReceivingFrames() {

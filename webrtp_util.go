@@ -91,7 +91,7 @@ func AnnexbToNalus(data []byte) [][]byte {
 		if idx+1 < len(indices) {
 			end = indices[idx+1]
 		}
-		nalu := bytes.Trim(data[start+offset:end], "\x00")
+		nalu := data[start+offset : end]
 		if len(nalu) > 0 {
 			nalus = append(nalus, nalu)
 		}

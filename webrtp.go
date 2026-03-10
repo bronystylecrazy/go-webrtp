@@ -20,6 +20,7 @@ type Config struct {
 	SourceType      string
 	Rtsp            string
 	Device          string
+	Path            string
 	Codec           string
 	Width           int
 	Height          int
@@ -74,6 +75,7 @@ func Init(cfg *Config) *Instance {
 			SourceType:      sourceType,
 			Rtsp:            cfg.Rtsp,
 			Device:          cfg.Device,
+			Path:            cfg.Path,
 			Codec:           strings.ToLower(strings.TrimSpace(cfg.Codec)),
 			Width:           cfg.Width,
 			Height:          cfg.Height,

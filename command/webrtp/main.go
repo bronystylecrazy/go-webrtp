@@ -57,11 +57,13 @@ type Upstream struct {
 	SourceType  *string      `yaml:"sourceType"`
 	RtspUrl     string       `yaml:"rtspUrl"`
 	Device      string       `yaml:"device"`
+	Path        string       `yaml:"path"`
 	Codec       string       `yaml:"codec"`
 	Width       *int         `yaml:"width"`
 	Height      *int         `yaml:"height"`
 	FrameRate   *float64     `yaml:"frameRate"`
 	BitrateKbps *int         `yaml:"bitrateKbps"`
+	Enabled     *bool        `yaml:"enabled"`
 	OnDemand    bool         `yaml:"onDemand"`
 	Renditions  []*Rendition `yaml:"renditions"`
 }

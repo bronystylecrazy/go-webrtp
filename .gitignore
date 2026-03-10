@@ -21,3 +21,5 @@ dist
 *.css.map
 zzz.go
 recordings
+*.h264
+*.mkv

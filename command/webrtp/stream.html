@@ -1,18 +1,24 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebRTP Stream</title>
+    <script src="https://unpkg.com/konva@10.2.0/konva.min.js"></script>
     <style>
         :root {
             color-scheme: dark;
             --bg: #0b1220;
-            --panel: rgba(15, 23, 42, 0.9);
-            --line: rgba(148, 163, 184, 0.24);
+            --panel: rgba(8, 15, 30, 0.88);
+            --panel-strong: rgba(9, 17, 32, 0.96);
+            --line: rgba(148, 163, 184, 0.18);
+            --line-strong: rgba(148, 163, 184, 0.32);
             --text: #e5eefb;
             --muted: #93a4bf;
             --accent: #38bdf8;
+            --accent-soft: rgba(56, 189, 248, 0.14);
+            --glow: rgba(34, 211, 238, 0.22);
         }
 
         * {
@@ -37,38 +43,216 @@
         }
 
         .header {
-            position: absolute;
+            position: fixed;
             top: 20px;
             left: 20px;
-            right: 20px;
             z-index: 2;
-            display: flex;
-            justify-content: space-between;
-            gap: 16px;
-            align-items: center;
-            padding: 16px 18px;
+            width: min(420px, calc(100vw - 40px));
+            height: auto;
             border: 1px solid var(--line);
             border-radius: 18px;
-            background: rgba(15, 23, 42, 0.78);
-            backdrop-filter: blur(16px);
+            background:
+                linear-gradient(135deg, rgba(56, 189, 248, 0.12), transparent 38%),
+                linear-gradient(180deg, rgba(15, 23, 42, 0.88), rgba(2, 6, 23, 0.84));
+            box-shadow:
+                0 14px 40px rgba(2, 6, 23, 0.35),
+                inset 0 1px 0 rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(18px);
+            overflow: hidden;
+            touch-action: none;
+            resize: none;
+        }
+
+        .header-body {
+            display: grid;
+            gap: 10px;
+            align-items: start;
+            padding: 12px;
+            max-height: 100%;
+            overflow: auto;
+        }
+
+        .header-bar {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .header-main,
+        .header-stats,
+        .header-controls {
+            min-width: 0;
+        }
+
+        .header-main {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            width: fit-content;
+            padding: 5px 8px;
+            border: 1px solid rgba(125, 211, 252, 0.18);
+            border-radius: 999px;
+            background: rgba(2, 6, 23, 0.45);
+            color: #b8d8f7;
+            font-size: 0.64rem;
+            font-weight: 700;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }
+
+        .eyebrow::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #67e8f9, #38bdf8);
+            box-shadow: 0 0 16px var(--glow);
+        }
+
+        .title-block {
+            display: grid;
+            gap: 4px;
         }
 
         .title {
             margin: 0;
-            font-size: clamp(1.1rem, 2vw, 1.5rem);
+            font-size: clamp(1.15rem, 2.8vw, 1.6rem);
+            line-height: 1;
+            letter-spacing: -0.04em;
         }
 
         .meta {
             color: var(--muted);
-            font-size: 0.95rem;
+            font-size: 0.82rem;
+        }
+
+        #stream-meta {
+            max-width: 32ch;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .header-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        .summary-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            padding: 5px 8px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(2, 6, 23, 0.38);
+            color: #d9e7fa;
+            font-size: 0.72rem;
+            line-height: 1;
+        }
+
+        .summary-chip strong {
+            color: #f8fbff;
+            font-size: 0.76rem;
+            font-weight: 700;
+        }
+
+        .summary-chip-toggle {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .summary-chip-toggle input {
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--accent);
+        }
+
+        .header-toggle {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border: 1px solid var(--line-strong);
+            border-radius: 999px;
+            background: rgba(2, 6, 23, 0.6);
+            color: var(--text);
+            font: inherit;
+            cursor: pointer;
+            transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+        }
+
+        .header-toggle:hover {
+            background: rgba(8, 15, 30, 0.88);
+            border-color: rgba(103, 232, 249, 0.34);
+        }
+
+        .header-toggle:focus {
+            outline: none;
+            border-color: rgba(103, 232, 249, 0.52);
+            box-shadow: 0 0 0 4px var(--accent-soft);
+        }
+
+        .header-toggle-icon {
+            font-size: 1rem;
+            line-height: 1;
+            transition: transform 160ms ease;
+        }
+
+        .drag-handle {
+            cursor: grab;
+        }
+
+        .header.is-dragging,
+        .header.is-dragging .drag-handle {
+            cursor: grabbing;
+        }
+
+        .resize-handle {
+            position: absolute;
+            right: 8px;
+            bottom: 8px;
+            width: 16px;
+            height: 16px;
+            border-right: 2px solid rgba(148, 163, 184, 0.65);
+            border-bottom: 2px solid rgba(148, 163, 184, 0.65);
+            border-bottom-right-radius: 4px;
+            cursor: nwse-resize;
+            z-index: 3;
+        }
+
+        .header.is-collapsed .resize-handle {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .header-details {
+            display: grid;
+            gap: 10px;
         }
 
         .meta-row {
             display: flex;
             flex-wrap: wrap;
             align-items: center;
-            gap: 10px;
-            margin-top: 6px;
+            gap: 8px;
+            padding: 9px 10px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(2, 6, 23, 0.42);
         }
 
         .viewer {
@@ -90,26 +274,223 @@
             transition: opacity 160ms ease;
         }
 
+        .viewer-grid-overlay {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .desk-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            pointer-events: none;
+        }
+
+        .desk-overlay.is-hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .desk-overlay .konvajs-content,
+        .desk-overlay canvas {
+            width: 100% !important;
+            height: 100% !important;
+            pointer-events: none;
+        }
+
+        .desk-handle {
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            margin-left: -11px;
+            margin-top: -11px;
+            border: 2px solid #e0f2fe;
+            border-radius: 999px;
+            background: #38bdf8;
+            box-shadow: 0 0 18px rgba(56, 189, 248, 0.55);
+            cursor: grab;
+            pointer-events: auto;
+            touch-action: none;
+        }
+
+        .desk-handle.is-dragging {
+            cursor: grabbing;
+        }
+
+        .desk-handle-label {
+            position: absolute;
+            left: 16px;
+            top: -10px;
+            color: #f8fbff;
+            font-size: 13px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .desk-preview-panel {
+            position: absolute;
+            right: 24px;
+            bottom: 24px;
+            z-index: 2;
+            width: min(34vw, 460px);
+            height: auto;
+            min-width: 280px;
+            padding: 12px;
+            border: 1px solid rgba(125, 211, 252, 0.2);
+            border-radius: 20px;
+            background:
+                radial-gradient(circle at top right, rgba(56, 189, 248, 0.18), transparent 42%),
+                linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(2, 6, 23, 0.92));
+            box-shadow:
+                0 24px 64px rgba(2, 6, 23, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.04);
+            backdrop-filter: blur(18px);
+            touch-action: none;
+        }
+
+        .desk-preview-panel.is-hidden {
+            display: none;
+        }
+
+        .desk-preview-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+            cursor: grab;
+        }
+
+        .desk-preview-header-main {
+            display: grid;
+            gap: 2px;
+            min-width: 0;
+        }
+
+        .desk-preview-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: default;
+        }
+
+        .desk-preview-fullscreen {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.78);
+            color: var(--text);
+            padding: 7px 10px;
+            font: inherit;
+            cursor: pointer;
+            transition: border-color 160ms ease, background 160ms ease;
+        }
+
+        .desk-preview-fullscreen:hover {
+            border-color: var(--line-strong);
+            background: rgba(7, 12, 24, 0.92);
+        }
+
+        .desk-preview-panel.is-dragging,
+        .desk-preview-panel.is-dragging .desk-preview-header {
+            cursor: grabbing;
+        }
+
+        .desk-preview-title {
+            margin: 0;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: #d6e8ff;
+        }
+
+        .desk-preview-meta {
+            color: var(--muted);
+            font-size: 0.72rem;
+        }
+
+        .desk-preview-surface {
+            position: relative;
+            aspect-ratio: 4 / 3;
+            border-radius: 16px;
+            overflow: hidden;
+            background:
+                linear-gradient(180deg, rgba(15, 23, 42, 0.88), rgba(2, 6, 23, 0.96));
+            border: 1px solid rgba(148, 163, 184, 0.16);
+        }
+
+        .desk-preview-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .desk-preview-note {
+            margin: 10px 2px 0;
+            color: var(--muted);
+            font-size: 0.75rem;
+            line-height: 1.4;
+        }
+
+        .desk-preview-resize {
+            position: absolute;
+            right: 8px;
+            bottom: 8px;
+            width: 16px;
+            height: 16px;
+            border-right: 2px solid rgba(148, 163, 184, 0.65);
+            border-bottom: 2px solid rgba(148, 163, 184, 0.65);
+            border-bottom-right-radius: 4px;
+            cursor: nwse-resize;
+        }
+
         .viewer video.is-hidden {
             opacity: 0;
             pointer-events: none;
         }
 
+
         .status {
-            display: flex;
-            gap: 14px;
-            flex-wrap: wrap;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
             color: var(--muted);
-            font-size: 0.92rem;
+            font-size: 0.82rem;
+        }
+
+        .status-card {
+            display: grid;
+            gap: 3px;
+            min-width: 0;
+            padding: 9px 10px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background:
+                linear-gradient(180deg, rgba(8, 15, 30, 0.92), rgba(8, 15, 30, 0.7));
+        }
+
+        .status-label {
+            color: var(--muted);
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
         }
 
         .status strong {
-            color: var(--accent);
-            display: inline-block;
-            min-width: 6ch;
+            color: #f8fbff;
+            display: block;
             font-variant-numeric: tabular-nums;
             font-feature-settings: "tnum" 1;
-            text-align: right;
+            font-size: 0.9rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         #quality {
@@ -117,796 +498,2982 @@
         }
 
         .controls {
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            display: grid;
+            gap: 6px;
             color: var(--muted);
-            font-size: 0.92rem;
+            font-size: 0.68rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .header-controls {
+            display: grid;
+            align-content: start;
+            gap: 10px;
+            padding: 10px;
+            border: 1px solid var(--line-strong);
+            border-radius: 14px;
+            background:
+                radial-gradient(circle at top right, rgba(56, 189, 248, 0.12), transparent 38%),
+                var(--panel-strong);
+        }
+
+        .controls-heading {
+            margin: 0;
+            color: #d6e8ff;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+        }
+
+        .controls-note {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.4;
         }
 
         .quality-select {
+            width: 100%;
+            min-width: 0;
             border: 1px solid var(--line);
-            border-radius: 999px;
-            background: rgba(2, 6, 23, 0.72);
+            border-radius: 12px;
+            background: rgba(2, 6, 23, 0.78);
             color: var(--text);
-            padding: 8px 14px;
+            padding: 9px 11px;
             font: inherit;
+            text-transform: none;
+            letter-spacing: normal;
+            outline: none;
+            transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+        }
+
+        .quality-select:hover {
+            border-color: var(--line-strong);
+            background: rgba(7, 12, 24, 0.92);
+        }
+
+        .quality-select:focus {
+            border-color: rgba(103, 232, 249, 0.52);
+            box-shadow: 0 0 0 4px var(--accent-soft);
         }
 
         .mode-select {
-            max-width: min(46vw, 420px);
+            flex: 1 1 200px;
+            max-width: 100%;
+        }
+
+        .effect-grid {
+            display: grid;
+            gap: 8px;
+        }
+
+        .effect-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: rgba(2, 6, 23, 0.42);
+            color: var(--text);
+            font-size: 0.78rem;
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .effect-toggle input {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--accent);
+        }
+
+        .effect-sliders {
+            display: grid;
+            gap: 8px;
+        }
+
+        .effect-slider {
+            display: grid;
+            gap: 6px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: rgba(2, 6, 23, 0.42);
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .effect-slider-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            color: #d9e7fa;
+            font-size: 0.76rem;
+        }
+
+        .effect-slider-value {
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .effect-input-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .effect-slider input[type="range"] {
+            width: 100%;
+            margin: 0;
+            accent-color: var(--accent);
+        }
+
+        .effect-number {
+            width: 88px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.78);
+            color: var(--text);
+            padding: 7px 9px;
+            font: inherit;
+        }
+
+        .effect-reset {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.78);
+            color: var(--text);
+            padding: 7px 10px;
+            font: inherit;
+            cursor: pointer;
+            transition: border-color 160ms ease, background 160ms ease;
+        }
+
+        .effect-reset:hover {
+            border-color: var(--line-strong);
+            background: rgba(7, 12, 24, 0.92);
+        }
+
+        .header.is-collapsed {
+            width: min(320px, calc(100vw - 24px));
+            height: auto;
+        }
+
+        .header.is-collapsed .header-details {
+            display: none;
+        }
+
+        .header.is-collapsed .header-toggle-icon {
+            transform: rotate(180deg);
+        }
+
+        @media (max-width: 1200px) {
+            .status {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
         }
 
         @media (max-width: 900px) {
             .header {
                 top: 12px;
                 left: 12px;
-                right: 12px;
-                flex-direction: column;
-                align-items: flex-start;
+                width: min(360px, calc(100vw - 24px));
             }
+
+            .title {
+                font-size: clamp(1.05rem, 5vw, 1.35rem);
+            }
+
+            .status {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .desk-preview-panel {
+                right: 12px;
+                bottom: 12px;
+                width: min(46vw, 380px);
+            }
+
+        }
+
+        @media (max-width: 560px) {
+
+            .header,
+            .header.is-collapsed {
+                width: calc(100vw - 24px);
+            }
+
+            .header-summary {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .status {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            .desk-preview-panel {
+                width: calc(100vw - 24px);
+                min-width: 0;
+            }
+
         }
     </style>
 </head>
+
 <body>
-<main class="page">
-    <section class="header">
-        <div>
-            <h1 class="title" id="stream-title">Loading stream...</h1>
-            <div class="meta" id="stream-meta">Resolving stream details</div>
-            <div class="meta-row">
-                <span class="meta">Available modes</span>
-                <select id="mode-select" class="quality-select mode-select">
-                    <option value="">Loading capabilities</option>
-                </select>
+    <main class="page">
+        <section class="header is-collapsed" id="stream-header">
+            <div class="header-body">
+                <div class="header-bar">
+                    <div class="header-main">
+                        <span class="eyebrow">Live</span>
+                        <div class="title-block">
+                            <h1 class="title" id="stream-title">Loading stream...</h1>
+                            <div class="meta" id="stream-meta">Resolving stream details</div>
+                        </div>
+                        <div class="header-summary">
+                            <span class="summary-chip"><strong id="codec">-</strong> codec</span>
+                            <span class="summary-chip"><strong id="resolution">-</strong> res</span>
+                            <span class="summary-chip"><strong id="framerate">-</strong> fps</span>
+                            <span class="summary-chip"><strong id="quality">default</strong> quality</span>
+                            <label class="summary-chip summary-chip-toggle">
+                                <input id="fisheye-enabled-collapsed" type="checkbox">
+                                <strong>fisheye</strong>
+                            </label>
+                        </div>
+                    </div>
+                    <button class="header-toggle drag-handle" id="header-toggle" type="button" aria-expanded="false"
+                        aria-controls="header-details" title="Expand stream controls">
+                        <span class="header-toggle-icon">+</span>
+                    </button>
+                </div>
+                <div class="header-details" id="header-details">
+                    <div class="meta-row">
+                        <span class="meta">Available modes</span>
+                        <select id="mode-select" class="quality-select mode-select">
+                            <option value="">Loading capabilities</option>
+                        </select>
+                    </div>
+                    <div class="status header-stats" id="stream-status">
+                        <span class="status-card"><span class="status-label">Bitrate</span><strong
+                                id="bitrate">-</strong></span>
+                        <span class="status-card"><span class="status-label">Receive Rate</span><strong
+                                id="bytes">-</strong></span>
+                        <span class="status-card"><span class="status-label">Frame</span><strong
+                                id="frame-no">0</strong></span>
+                    </div>
+                    <div class="header-controls">
+                        <p class="controls-heading">Playback</p>
+                        <p class="controls-note">Open only when you need to switch source or rendition.</p>
+                        <label class="controls">
+                            <span>Stream</span>
+                            <select id="stream-select" class="quality-select">
+                                <option value="">Loading...</option>
+                            </select>
+                        </label>
+                        <label class="controls">
+                            <span>Quality</span>
+                            <select id="quality-select" class="quality-select">
+                                <option value="">Default</option>
+                            </select>
+                        </label>
+                        <div class="effect-grid">
+                            <p class="controls-heading">Fisheye</p>
+                            <label class="effect-toggle">
+                                <span>Enable distortion</span>
+                                <input id="fisheye-enabled" type="checkbox">
+                            </label>
+                            <label class="effect-toggle">
+                                <span>Show grid</span>
+                                <input id="fisheye-grid-enabled" type="checkbox">
+                            </label>
+                            <div class="effect-sliders">
+                                <label class="effect-slider">
+                                    <span class="effect-slider-header">
+                                        <span>Strength X</span>
+                                        <span class="effect-slider-value" id="fisheye-fx-value">0.00</span>
+                                    </span>
+                                    <input id="fisheye-fx" type="range" min="-0.25" max="0.25" step="0.01" value="0">
+                                    <span class="effect-input-row">
+                                        <input id="fisheye-fx-input" class="effect-number" type="number" min="-0.25"
+                                            max="0.25" step="0.01" value="0">
+                                        <button id="fisheye-fx-reset" class="effect-reset" type="button">Reset</button>
+                                    </span>
+                                </label>
+                                <label class="effect-slider">
+                                    <span class="effect-slider-header">
+                                        <span>Strength Y</span>
+                                        <span class="effect-slider-value" id="fisheye-fy-value">0.00</span>
+                                    </span>
+                                    <input id="fisheye-fy" type="range" min="-0.25" max="0.25" step="0.01" value="0">
+                                    <span class="effect-input-row">
+                                        <input id="fisheye-fy-input" class="effect-number" type="number" min="-0.25"
+                                            max="0.25" step="0.01" value="0">
+                                        <button id="fisheye-fy-reset" class="effect-reset" type="button">Reset</button>
+                                    </span>
+                                </label>
+                                <label class="effect-slider">
+                                    <span class="effect-slider-header">
+                                        <span>Scale</span>
+                                        <span class="effect-slider-value" id="fisheye-scale-value">1.00</span>
+                                    </span>
+                                    <input id="fisheye-scale" type="range" min="0.5" max="3" step="0.01" value="1">
+                                    <span class="effect-input-row">
+                                        <input id="fisheye-scale-input" class="effect-number" type="number" min="0.5"
+                                            max="3" step="0.01" value="1">
+                                        <button id="fisheye-scale-reset" class="effect-reset"
+                                            type="button">Reset</button>
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="effect-grid">
+                            <p class="controls-heading">Desk View</p>
+                            <label class="effect-toggle">
+                                <span>Enable rectification</span>
+                                <input id="desk-view-enabled" type="checkbox" checked>
+                            </label>
+                            <button id="desk-view-reset" class="effect-reset" type="button">Reset corners</button>
+                            <p class="controls-note">Drag the four overlay points over the desk corners. The preview is
+                                rebuilt from two triangles for the top-down view.</p>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </div>
-        <div class="status" id="stream-status">
-            <span><strong id="codec">-</strong> codec</span>
-            <span><strong id="resolution">-</strong> resolution</span>
-            <span><strong id="framerate">-</strong> fps</span>
-            <span><strong id="bitrate">-</strong> kbps</span>
-            <span><strong id="quality">default</strong> quality</span>
-            <span><strong id="bytes">-</strong> rx/s</span>
-            <span><strong id="frame-no">0</strong> frame</span>
-        </div>
-        <label class="controls">
-            <span>Stream</span>
-            <select id="stream-select" class="quality-select">
-                <option value="">Loading...</option>
-            </select>
-        </label>
-        <label class="controls">
-            <span>Quality</span>
-            <select id="quality-select" class="quality-select">
-                <option value="">Default</option>
-            </select>
-        </label>
-    </section>
+            <div class="resize-handle" id="header-resize-handle" aria-hidden="true"></div>
+        </section>
 
-    <section class="viewer">
-        <video id="stream-video-a" autoplay playsinline muted controls></video>
-        <video id="stream-video-b" autoplay playsinline muted controls class="is-hidden"></video>
-    </section>
-</main>
+        <section class="viewer">
+            <video id="stream-video-a" autoplay playsinline muted controls></video>
+            <video id="stream-video-b" autoplay playsinline muted controls class="is-hidden"></video>
+            <canvas id="viewer-grid-overlay" class="viewer-grid-overlay" aria-hidden="true"></canvas>
+            <div id="desk-overlay" class="desk-overlay" aria-hidden="true"></div>
+            <section id="desk-preview-panel" class="desk-preview-panel">
+                <div class="desk-preview-header">
+                    <div class="desk-preview-header-main">
+                        <h2 class="desk-preview-title">Desk View</h2>
+                        <span id="desk-preview-meta" class="desk-preview-meta">4-point rectification</span>
+                    </div>
+                    <div class="desk-preview-actions">
+                        <button id="desk-preview-fullscreen" class="desk-preview-fullscreen" type="button">Fullscreen</button>
+                    </div>
+                </div>
+                <div class="desk-preview-surface">
+                    <canvas id="desk-preview-canvas" class="desk-preview-canvas"></canvas>
+                </div>
+                <p class="desk-preview-note">Pull the corners into place to flatten the desk surface into a clean
+                    preview.</p>
+                <div id="desk-preview-resize" class="desk-preview-resize" aria-hidden="true"></div>
+            </section>
+        </section>
+    </main>
 
-<script>
-    class StreamPlayer {
-        constructor(wsUrl) {
-            this.wsUrl = wsUrl;
-            this.ws = null;
-            this.canvas = null;
-            this.ctx = null;
-            this.decoder = null;
-            this.frameIndex = 0;
-            this.initDone = false;
-            this.codec = null;
-            this.desc = null;
-            this.firstFrame = true;
-            this.dropped = 0;
-            this._oninfo = null;
-            this._paused = false;
-            this._videoEl = null;
-            this._closed = false;
-            this._reconnectTimer = null;
-            this._reconnectDelay = 1000;
-            this._pendingDecode = 0;
-            this._waitingForKeyframe = false;
-            this._maxPendingDecode = 8;
-            this._lateFrameThreshold = 16;
-            this._onready = null;
-            this._didRenderFrame = false;
-            this._lastActivityAt = Date.now();
-            this._watchdogTimer = setInterval(() => this.checkHealth(), 1000);
-            this._frameOffset = 0;
-            this._lastRawFrameNo = 0;
-            this._lastDisplayFrameNo = 0;
+    <script>
+        class WebGpuRenderer {
+            constructor(canvas, device, context, format, pipeline, sampler, uniformBuffer, bindGroupLayout) {
+                this.canvas = canvas;
+                this.device = device;
+                this.context = context;
+                this.format = format;
+                this.pipeline = pipeline;
+                this.sampler = sampler;
+                this.uniformBuffer = uniformBuffer;
+                this.bindGroupLayout = bindGroupLayout;
+                this.available = true;
+                this.settings = {
+                    enabled: false,
+                    lensA: 1,
+                    lensB: 1,
+                    fx: 0,
+                    fy: 0,
+                    scale: 1,
+                };
+            }
 
-            this.connect();
-        }
-
-        connect() {
-            if (this._closed) return;
-            this.ws = new WebSocket(this.wsUrl);
-            this.ws.binaryType = 'arraybuffer';
-            this.ws.onopen = () => {
-                this._lastActivityAt = Date.now();
-                this._reconnectDelay = 1000;
-            };
-            this.ws.onmessage = (e) => this.onMessage(e);
-            this.ws.onclose = () => this.scheduleReconnect();
-            this.ws.onerror = () => {
-                if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-                    this.ws.close();
+            static async create(canvas) {
+                if (!('gpu' in navigator)) {
+                    return null;
                 }
-            };
+                const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                if (!adapter) {
+                    return null;
+                }
+                const device = await adapter.requestDevice();
+                const context = canvas.getContext('webgpu');
+                if (!context) {
+                    return null;
+                }
+                const format = navigator.gpu.getPreferredCanvasFormat();
+                context.configure({
+                    device,
+                    format,
+                    alphaMode: 'opaque',
+                });
+                const shaderModule = device.createShaderModule({
+                    code: `
+struct EffectUniforms {
+    lens_a: f32,
+    lens_b: f32,
+    scale: f32,
+    enabled: f32,
+    fx: f32,
+    fy: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var tex: texture_external;
+@group(0) @binding(2) var<uniform> uniforms: EffectUniforms;
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) clip_pos: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
+        vec2<f32>(-1.0,  1.0)
+    );
+    var out: VertexOut;
+    let pos = positions[vertex_index];
+    out.position = vec4<f32>(pos, 0.0, 1.0);
+    out.clip_pos = pos;
+    return out;
+}
+
+fn gl_coord_to_texture_coord(gl_coord: vec2<f32>) -> vec2<f32> {
+    return gl_coord * vec2<f32>(1.0, -1.0) / 2.0 + vec2<f32>(0.5, 0.5);
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let scale = select(1.0, uniforms.scale, uniforms.enabled > 0.5);
+    let fx = select(0.0, uniforms.fx, uniforms.enabled > 0.5);
+    let fy = select(0.0, uniforms.fy, uniforms.enabled > 0.5);
+    var mapping = in.clip_pos;
+    mapping.x = mapping.x + (((in.clip_pos.y * in.clip_pos.y) / scale) * in.clip_pos.x / scale) * -fx;
+    mapping.y = mapping.y + (((in.clip_pos.x * in.clip_pos.x) / scale) * in.clip_pos.y / scale) * -fy;
+    mapping = mapping * vec2<f32>(uniforms.lens_a, uniforms.lens_b);
+    mapping = gl_coord_to_texture_coord(mapping / scale);
+    if (mapping.x > 0.99 || mapping.x < 0.01 || mapping.y > 0.99 || mapping.y < 0.01) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    return textureSampleBaseClampToEdge(tex, samp, mapping);
+}
+                `,
+                });
+                const bindGroupLayout = device.createBindGroupLayout({
+                    entries: [
+                        { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                        { binding: 1, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} },
+                        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                    ],
+                });
+                const pipeline = device.createRenderPipeline({
+                    layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+                    vertex: {
+                        module: shaderModule,
+                        entryPoint: 'vs_main',
+                    },
+                    fragment: {
+                        module: shaderModule,
+                        entryPoint: 'fs_main',
+                        targets: [{ format }],
+                    },
+                    primitive: {
+                        topology: 'triangle-list',
+                    },
+                });
+                const sampler = device.createSampler({
+                    magFilter: 'linear',
+                    minFilter: 'linear',
+                });
+                const uniformBuffer = device.createBuffer({
+                    size: 32,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                return new WebGpuRenderer(canvas, device, context, format, pipeline, sampler, uniformBuffer, bindGroupLayout);
+            }
+
+            setSettings(next) {
+                this.settings = {
+                    ...this.settings,
+                    ...next,
+                };
+            }
+
+            resize(width, height) {
+                if (this.canvas.width === width && this.canvas.height === height) {
+                    return;
+                }
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.context.configure({
+                    device: this.device,
+                    format: this.format,
+                    alphaMode: 'opaque',
+                });
+            }
+
+            draw(frame) {
+                if (!this.available) {
+                    return false;
+                }
+
+                const width = frame.displayWidth || frame.codedWidth || this.canvas.width || 1;
+                const height = frame.displayHeight || frame.codedHeight || this.canvas.height || 1;
+                this.resize(width, height);
+                const uniforms = new Float32Array([
+                    Number(this.settings.lensA || 1),
+                    Number(this.settings.lensB || 1),
+                    Number(this.settings.enabled ? this.settings.scale : 1),
+                    Number(this.settings.enabled ? 1 : 0),
+                    Number(this.settings.enabled ? this.settings.fx : 0),
+                    Number(this.settings.enabled ? this.settings.fy : 0),
+                    0,
+                    0,
+                ]);
+                this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
+                const externalTexture = this.device.importExternalTexture({ source: frame });
+                const bindGroup = this.device.createBindGroup({
+                    layout: this.bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: this.sampler },
+                        { binding: 1, resource: externalTexture },
+                        { binding: 2, resource: { buffer: this.uniformBuffer } },
+                    ],
+                });
+                const encoder = this.device.createCommandEncoder();
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: this.context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        storeOp: 'store',
+                    }],
+                });
+                pass.setPipeline(this.pipeline);
+                pass.setBindGroup(0, bindGroup);
+                pass.draw(6);
+                pass.end();
+                this.device.queue.submit([encoder.finish()]);
+                return true;
+            }
         }
 
-        resetStreamState() {
-            this.initDone = false;
-            this.codec = null;
-            this.desc = null;
-            this.firstFrame = true;
-            this.frameIndex = 0;
-            this._didRenderFrame = false;
-            this._pendingDecode = 0;
-            this._waitingForKeyframe = false;
-            this._lastRawFrameNo = 0;
-            if (this.decoder && this.decoder.state !== 'closed') {
-                try { this.decoder.close(); } catch (_) {}
+        class WebGlRenderer {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.gl = this.canvas.getContext('webgl', {
+                    alpha: false,
+                    antialias: false,
+                    depth: false,
+                    stencil: false,
+                    preserveDrawingBuffer: false,
+                });
+                this.available = false;
+                this.settings = {
+                    enabled: false,
+                    lensA: 1,
+                    lensB: 1,
+                    fx: 0,
+                    fy: 0,
+                    scale: 1,
+                };
+                if (!this.gl) {
+                    return;
+                }
+
+                const vertexSrc = `
+                attribute vec3 aVertexPosition;
+                attribute vec2 aTextureCoord;
+                varying vec3 vPosition;
+                void main(void) {
+                    vPosition = aVertexPosition;
+                    gl_Position = vec4(vPosition, 1.0);
+                }
+            `;
+
+                const fragmentSrc = `
+                precision highp float;
+                uniform vec3 uLensS;
+                uniform vec2 uLensF;
+                uniform sampler2D uSampler;
+                varying vec3 vPosition;
+                vec2 glCoordToTextureCoord(vec2 glCoord) {
+                    return glCoord * vec2(1.0, -1.0) / 2.0 + vec2(0.5, 0.5);
+                }
+                void main(void) {
+                    float scale = uLensS.z;
+                    vec3 vPos = vPosition;
+                    float fx = uLensF.x;
+                    float fy = uLensF.y;
+                    vec2 mapping = vPos.xy;
+                    mapping.x = mapping.x + ((pow(vPos.y, 2.0) / scale) * vPos.x / scale) * -fx;
+                    mapping.y = mapping.y + ((pow(vPos.x, 2.0) / scale) * vPos.y / scale) * -fy;
+                    mapping = mapping * uLensS.xy;
+                    mapping = glCoordToTextureCoord(mapping / scale);
+                    vec4 color = texture2D(uSampler, mapping);
+                    if (mapping.x > 0.99 || mapping.x < 0.01 || mapping.y > 0.99 || mapping.y < 0.01) {
+                        color = vec4(0.0, 0.0, 0.0, 1.0);
+                    }
+                    gl_FragColor = color;
+                }
+            `;
+
+                const program = this.createProgram(vertexSrc, fragmentSrc);
+                this.program = program;
+                this.positionLocation = this.gl.getAttribLocation(program, 'aVertexPosition');
+                this.samplerLocation = this.gl.getUniformLocation(program, 'uSampler');
+                this.lensSLocation = this.gl.getUniformLocation(program, 'uLensS');
+                this.lensFLocation = this.gl.getUniformLocation(program, 'uLensF');
+                this.texture = this.gl.createTexture();
+                const vertices = new Float32Array([
+                    -1.0, -1.0, 0.0,
+                    1.0, -1.0, 0.0,
+                    1.0, 1.0, 0.0,
+                    -1.0, -1.0, 0.0,
+                    1.0, 1.0, 0.0,
+                    -1.0, 1.0, 0.0,
+                ]);
+                this.vertexBuffer = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.STATIC_DRAW);
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+                this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, false);
+                this.gl.useProgram(program);
+                this.gl.uniform1i(this.samplerLocation, 0);
+                this.gl.clearColor(0, 0, 0, 1);
+                this.available = true;
             }
-            this.decoder = null;
+
+            createShader(type, source) {
+                const shader = this.gl.createShader(type);
+                this.gl.shaderSource(shader, source);
+                this.gl.compileShader(shader);
+                if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+                    throw new Error(this.gl.getShaderInfoLog(shader) || 'shader compile failed');
+                }
+                return shader;
+            }
+
+            createProgram(vertexSrc, fragmentSrc) {
+                const vertexShader = this.createShader(this.gl.VERTEX_SHADER, vertexSrc);
+                const fragmentShader = this.createShader(this.gl.FRAGMENT_SHADER, fragmentSrc);
+                const program = this.gl.createProgram();
+                this.gl.attachShader(program, vertexShader);
+                this.gl.attachShader(program, fragmentShader);
+                this.gl.linkProgram(program);
+                if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+                    throw new Error(this.gl.getProgramInfoLog(program) || 'program link failed');
+                }
+                return program;
+            }
+
+            setSettings(next) {
+                this.settings = {
+                    ...this.settings,
+                    ...next,
+                };
+            }
+
+            resize(width, height) {
+                if (this.canvas.width === width && this.canvas.height === height) {
+                    return;
+                }
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.gl.viewport(0, 0, width, height);
+            }
+
+            draw(frame) {
+                if (!this.available) {
+                    return false;
+                }
+                const width = frame.displayWidth || frame.codedWidth || this.canvas.width || 1;
+                const height = frame.displayHeight || frame.codedHeight || this.canvas.height || 1;
+                this.resize(width, height);
+                this.gl.useProgram(this.program);
+                this.gl.activeTexture(this.gl.TEXTURE0);
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+                this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, frame);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+                this.gl.enableVertexAttribArray(this.positionLocation);
+                this.gl.vertexAttribPointer(this.positionLocation, 3, this.gl.FLOAT, false, 0, 0);
+                this.gl.uniform3fv(this.lensSLocation, new Float32Array([
+                    Number(this.settings.lensA || 1),
+                    Number(this.settings.lensB || 1),
+                    Number(this.settings.enabled ? this.settings.scale : 1),
+                ]));
+                this.gl.uniform2fv(this.lensFLocation, new Float32Array([
+                    Number(this.settings.enabled ? this.settings.fx : 0),
+                    Number(this.settings.enabled ? this.settings.fy : 0),
+                ]));
+                this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+                this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
+                return true;
+            }
         }
 
-        scheduleReconnect() {
-            if (this._closed) return;
-            this.resetStreamState();
-            clearTimeout(this._reconnectTimer);
-            this._reconnectTimer = setTimeout(() => {
-                this.connect();
-            }, this._reconnectDelay);
-            this._reconnectDelay = Math.min(this._reconnectDelay * 2, 5000);
+        function solveLinearSystem(matrix, values) {
+            const n = values.length;
+            const a = matrix.map((row, i) => [...row, values[i]]);
+            for (let col = 0; col < n; col++) {
+                let pivot = col;
+                for (let row = col + 1; row < n; row++) {
+                    if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) {
+                        pivot = row;
+                    }
+                }
+                if (Math.abs(a[pivot][col]) < 1e-8) {
+                    return null;
+                }
+                if (pivot !== col) {
+                    [a[col], a[pivot]] = [a[pivot], a[col]];
+                }
+                const divisor = a[col][col];
+                for (let k = col; k <= n; k++) {
+                    a[col][k] /= divisor;
+                }
+                for (let row = 0; row < n; row++) {
+                    if (row === col) {
+                        continue;
+                    }
+                    const factor = a[row][col];
+                    for (let k = col; k <= n; k++) {
+                        a[row][k] -= factor * a[col][k];
+                    }
+                }
+            }
+            return a.map((row) => row[n]);
         }
 
-        onMessage(e) {
-            if (this._paused) return;
-            this._lastActivityAt = Date.now();
+        function computeHomographyMatrix(srcQuad, dstQuad) {
+            const matrix = [];
+            const values = [];
+            for (let i = 0; i < 4; i++) {
+                const sx = Number(srcQuad[i].x || 0);
+                const sy = Number(srcQuad[i].y || 0);
+                const dx = Number(dstQuad[i].x || 0);
+                const dy = Number(dstQuad[i].y || 0);
+                matrix.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy]);
+                values.push(dx);
+                matrix.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy]);
+                values.push(dy);
+            }
+            const solution = solveLinearSystem(matrix, values);
+            if (!solution) {
+                return null;
+            }
+            return new Float32Array([
+                solution[0], solution[3], solution[6],
+                solution[1], solution[4], solution[7],
+                solution[2], solution[5], 1,
+            ]);
+        }
 
-            if (!this.initDone) {
-                this.initDone = true;
-                const parsed = this.parseInit(e.data);
-                this.codec = parsed.codec;
-                this.desc = parsed.description;
-                this.makeDecoder(this.codec, this.desc);
-                if (this._oninfo) this._oninfo({codec: this.codec});
-                return;
+        class DeskHomographyRenderer {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.gl = this.canvas.getContext('webgl', {
+                    alpha: false,
+                    antialias: false,
+                    depth: false,
+                    stencil: false,
+                    preserveDrawingBuffer: false,
+                });
+                this.available = false;
+                if (!this.gl) {
+                    return;
+                }
+                const vertexSrc = `
+                attribute vec2 aPosition;
+                varying vec2 vUv;
+                void main(void) {
+                    vec2 uv = aPosition * 0.5 + 0.5;
+                    vUv = vec2(uv.x, 1.0 - uv.y);
+                    gl_Position = vec4(aPosition, 0.0, 1.0);
+                }
+                `;
+                const fragmentSrc = `
+                precision highp float;
+                uniform sampler2D uSampler;
+                uniform mat3 uHomography;
+                uniform vec4 uDstRect;
+                varying vec2 vUv;
+                void main(void) {
+                    vec2 minUv = uDstRect.xy;
+                    vec2 maxUv = uDstRect.xy + uDstRect.zw;
+                    if (vUv.x < minUv.x || vUv.x > maxUv.x || vUv.y < minUv.y || vUv.y > maxUv.y) {
+                        gl_FragColor = vec4(0.0078, 0.0235, 0.0902, 1.0);
+                        return;
+                    }
+                    vec2 localUv = (vUv - minUv) / uDstRect.zw;
+                    vec3 mapped = uHomography * vec3(localUv, 1.0);
+                    vec2 srcUv = mapped.xy / mapped.z;
+                    if (srcUv.x < 0.0 || srcUv.x > 1.0 || srcUv.y < 0.0 || srcUv.y > 1.0) {
+                        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                        return;
+                    }
+                    gl_FragColor = texture2D(uSampler, srcUv);
+                }
+                `;
+                this.program = this.createProgram(vertexSrc, fragmentSrc);
+                this.positionLocation = this.gl.getAttribLocation(this.program, 'aPosition');
+                this.samplerLocation = this.gl.getUniformLocation(this.program, 'uSampler');
+                this.homographyLocation = this.gl.getUniformLocation(this.program, 'uHomography');
+                this.dstRectLocation = this.gl.getUniformLocation(this.program, 'uDstRect');
+                this.texture = this.gl.createTexture();
+                this.vertexBuffer = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array([
+                    -1, -1,
+                    1, -1,
+                    1, 1,
+                    -1, -1,
+                    1, 1,
+                    -1, 1,
+                ]), this.gl.STATIC_DRAW);
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+                this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+                this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, false);
+                this.gl.useProgram(this.program);
+                this.gl.uniform1i(this.samplerLocation, 0);
+                this.gl.clearColor(0.0078, 0.0235, 0.0902, 1.0);
+                this.available = true;
             }
 
-            if (!this.decoder || this.decoder.state !== 'configured') return;
-
-            const {frameNo, payload, isKey} = this.parseFrag(e.data);
-            const displayFrameNo = this.mapFrameNo(frameNo);
-            const decodeQueue = Math.max(this.decoder.decodeQueueSize || 0, this._pendingDecode);
-
-            if (this._waitingForKeyframe && !isKey) {
-                this.dropped++;
-                return;
+            createShader(type, source) {
+                const shader = this.gl.createShader(type);
+                this.gl.shaderSource(shader, source);
+                this.gl.compileShader(shader);
+                if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+                    throw new Error(this.gl.getShaderInfoLog(shader) || 'desk shader compile failed');
+                }
+                return shader;
             }
 
-            if (decodeQueue >= this._lateFrameThreshold && !isKey) {
-                this.dropped++;
-                this._waitingForKeyframe = true;
-                return;
+            createProgram(vertexSrc, fragmentSrc) {
+                const program = this.gl.createProgram();
+                this.gl.attachShader(program, this.createShader(this.gl.VERTEX_SHADER, vertexSrc));
+                this.gl.attachShader(program, this.createShader(this.gl.FRAGMENT_SHADER, fragmentSrc));
+                this.gl.linkProgram(program);
+                if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+                    throw new Error(this.gl.getProgramInfoLog(program) || 'desk program link failed');
+                }
+                return program;
             }
 
-            if (decodeQueue >= this._maxPendingDecode && !isKey) {
-                this.dropped++;
-                return;
+            resize(width, height) {
+                if (this.canvas.width === width && this.canvas.height === height) {
+                    return;
+                }
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.gl.viewport(0, 0, width, height);
             }
 
-            const ts = (++this.frameIndex) * 100_000;
+            draw(sourceCanvas, srcQuad, dstRect, canvasWidth, canvasHeight) {
+                if (!this.available) {
+                    return false;
+                }
+                this.resize(canvasWidth, canvasHeight);
+                const homography = computeHomographyMatrix(
+                    [
+                        { x: 0, y: 0 },
+                        { x: 1, y: 0 },
+                        { x: 1, y: 1 },
+                        { x: 0, y: 1 },
+                    ],
+                    srcQuad,
+                );
+                if (!homography) {
+                    return false;
+                }
+                this.gl.useProgram(this.program);
+                this.gl.activeTexture(this.gl.TEXTURE0);
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+                this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, sourceCanvas);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+                this.gl.enableVertexAttribArray(this.positionLocation);
+                this.gl.vertexAttribPointer(this.positionLocation, 2, this.gl.FLOAT, false, 0, 0);
+                this.gl.uniformMatrix3fv(this.homographyLocation, false, homography);
+                this.gl.uniform4fv(this.dstRectLocation, new Float32Array([
+                    dstRect.x / canvasWidth,
+                    dstRect.y / canvasHeight,
+                    dstRect.width / canvasWidth,
+                    dstRect.height / canvasHeight,
+                ]));
+                this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+                this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
+                return true;
+            }
+        }
 
+        async function createBestRenderer(canvas) {
             try {
-                this._pendingDecode++;
-                this.decoder.decode(new EncodedVideoChunk({
-                    type: isKey ? 'key' : 'delta',
-                    timestamp: ts,
-                    data: payload
-                }));
-                if (isKey) {
-                    this._waitingForKeyframe = false;
+                const webGpuRenderer = await WebGpuRenderer.create(canvas);
+                if (webGpuRenderer) {
+                    return webGpuRenderer;
                 }
-                if (this._oninfo) this._oninfo({frameNo: displayFrameNo});
-            } catch (_) {
-                this.dropped++;
-                this._pendingDecode = Math.max(0, this._pendingDecode - 1);
-                if (this.decoder.state !== 'configured') {
+            } catch (_) { }
+            try {
+                const webGlRenderer = new WebGlRenderer(canvas);
+                if (webGlRenderer.available) {
+                    return webGlRenderer;
+                }
+            } catch (_) { }
+            return null;
+        }
+
+        function drawGuideGrid(ctx, width, height, effectSettings, enabled) {
+            if (!enabled || !ctx || width <= 0 || height <= 0) {
+                return;
+            }
+            const mapGridPoint = (x, y, applyDistortion) => {
+                const scale = Number(effectSettings.scale || 1);
+                if (!applyDistortion) {
+                    return {
+                        x: x * scale,
+                        y: y * scale,
+                    };
+                }
+                const fx = Number(effectSettings.fx || 0);
+                const fy = Number(effectSettings.fy || 0);
+                const nextX = x + (((y * y) / scale) * x / scale) * -fx;
+                const nextY = y + (((x * x) / scale) * y / scale) * -fy;
+                return {
+                    x: nextX / scale,
+                    y: nextY / scale,
+                };
+            };
+            const lines = 10;
+            const samples = 48;
+            const applyDistortion = !effectSettings.enabled;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
+            ctx.lineWidth = 1;
+            const drawCurve = (pointAt) => {
+                ctx.beginPath();
+                for (let i = 0; i <= samples; i++) {
+                    const t = i / samples;
+                    const point = pointAt(t);
+                    const px = ((point.x + 1) / 2) * width;
+                    const py = ((1 - point.y) / 2) * height;
+                    if (i === 0) {
+                        ctx.moveTo(px, py);
+                    } else {
+                        ctx.lineTo(px, py);
+                    }
+                }
+                ctx.stroke();
+            };
+            for (let i = 0; i <= lines; i++) {
+                const v = -1 + (i / lines) * 2;
+                drawCurve((t) => mapGridPoint(v, -1 + t * 2, applyDistortion));
+                drawCurve((t) => mapGridPoint(-1 + t * 2, v, applyDistortion));
+            }
+            ctx.restore();
+        }
+
+        class StreamPlayer {
+            constructor(wsUrl) {
+                this.wsUrl = wsUrl;
+                this.ws = null;
+                this.canvas = null;
+                this.ctx = null;
+                this.renderer = null;
+                this.renderCanvas = null;
+                this.renderCtx = null;
+                this.decoder = null;
+                this.frameIndex = 0;
+                this.initDone = false;
+                this.codec = null;
+                this.desc = null;
+                this.firstFrame = true;
+                this.dropped = 0;
+                this._oninfo = null;
+                this._paused = false;
+                this._videoEl = null;
+                this._closed = false;
+                this._reconnectTimer = null;
+                this._reconnectDelay = 1000;
+                this._pendingDecode = 0;
+                this._waitingForKeyframe = false;
+                this._maxPendingDecode = 8;
+                this._lateFrameThreshold = 16;
+                this._onready = null;
+                this._didRenderFrame = false;
+                this._lastActivityAt = Date.now();
+                this._lastRenderAt = 0;
+                this._waitingForKeyframeSince = 0;
+                this._watchdogTimer = setInterval(() => this.checkHealth(), 1000);
+                this._frameOffset = 0;
+                this._lastRawFrameNo = 0;
+                this._lastDisplayFrameNo = 0;
+                this._lastReceivedFrameNo = 0;
+                this._effectSettings = {
+                    enabled: false,
+                    lensA: 1,
+                    lensB: 1,
+                    fx: 0,
+                    fy: 0,
+                    scale: 1,
+                };
+                this._gridEnabled = false;
+
+                this.connect();
+            }
+
+            connect() {
+                if (this._closed) return;
+                this.ws = new WebSocket(this.wsUrl);
+                this.ws.binaryType = 'arraybuffer';
+                this.ws.onopen = () => {
+                    this._lastActivityAt = Date.now();
+                    this._reconnectDelay = 1000;
+                };
+                this.ws.onmessage = (e) => this.onMessage(e);
+                this.ws.onclose = () => this.scheduleReconnect();
+                this.ws.onerror = () => {
+                    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+                        this.ws.close();
+                    }
+                };
+            }
+
+            resetStreamState() {
+                this.initDone = false;
+                this.codec = null;
+                this.desc = null;
+                this.firstFrame = true;
+                this.frameIndex = 0;
+                this._didRenderFrame = false;
+                this._pendingDecode = 0;
+                this._waitingForKeyframe = false;
+                this._waitingForKeyframeSince = 0;
+                this._lastRawFrameNo = 0;
+                this._lastReceivedFrameNo = 0;
+                this._lastRenderAt = 0;
+                if (this.decoder && this.decoder.state !== 'closed') {
+                    try { this.decoder.close(); } catch (_) { }
+                }
+                this.decoder = null;
+            }
+
+            resetDecoderForGap() {
+                this._pendingDecode = 0;
+                this._waitingForKeyframe = true;
+                this._waitingForKeyframeSince = Date.now();
+                if (this.decoder && this.decoder.state !== 'closed') {
+                    try { this.decoder.close(); } catch (_) { }
+                }
+                this.decoder = null;
+                if (this.codec) {
                     this.makeDecoder(this.codec, this.desc);
                 }
             }
-        }
 
-        checkHealth() {
-            if (this._closed || !this.ws) return;
-            if (this.ws.readyState !== WebSocket.OPEN) return;
-            const idleMs = Date.now() - this._lastActivityAt;
-            const limitMs = this.initDone ? 3000 : 8000;
-            if (idleMs < limitMs) return;
-            this.ws.close();
-        }
-
-        setFrameBase(frameNo) {
-            const base = Math.max(0, Number(frameNo || 0));
-            this._frameOffset = base;
-            this._lastDisplayFrameNo = base;
-        }
-
-        mapFrameNo(rawFrameNo) {
-            const raw = Math.max(0, Number(rawFrameNo || 0));
-            if (this._lastRawFrameNo > 0 && raw > 0 && raw < this._lastRawFrameNo) {
-                this._frameOffset = Math.max(this._frameOffset, this._lastDisplayFrameNo);
+            enterRecoveryMode(droppedFrames = 1) {
+                this.dropped += Math.max(1, Number(droppedFrames || 1));
+                this.resetDecoderForGap();
             }
-            this._lastRawFrameNo = raw;
-            const display = raw > 0 ? raw + this._frameOffset : this._lastDisplayFrameNo;
-            if (display > this._lastDisplayFrameNo) {
-                this._lastDisplayFrameNo = display;
-            }
-            return this._lastDisplayFrameNo;
-        }
 
-        parseInit(buf) {
-            const b = new Uint8Array(buf);
-            for (let i = 0; i < b.length - 8; i++) {
-                if (b[i] === 0x61 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
-                    const payStart = i + 4;
-                    const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
-                    const payLen = boxSize - 8;
-                    const profile = b[payStart + 1].toString(16).padStart(2, '0');
-                    const compat = b[payStart + 2].toString(16).padStart(2, '0');
-                    const level = b[payStart + 3].toString(16).padStart(2, '0');
-                    return {
-                        codec: 'avc1.' + profile + compat + level,
-                        description: buf.slice(payStart, payStart + payLen)
-                    };
+            scheduleReconnect() {
+                if (this._closed) return;
+                this.resetStreamState();
+                clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = setTimeout(() => {
+                    this.connect();
+                }, this._reconnectDelay);
+                this._reconnectDelay = Math.min(this._reconnectDelay * 2, 5000);
+            }
+
+            onMessage(e) {
+                if (this._paused) return;
+                this._lastActivityAt = Date.now();
+
+                if (!this.initDone) {
+                    this.initDone = true;
+                    const parsed = this.parseInit(e.data);
+                    this.codec = parsed.codec;
+                    this.desc = parsed.description;
+                    this.makeDecoder(this.codec, this.desc);
+                    if (this._oninfo) this._oninfo({ codec: this.codec });
+                    return;
                 }
-                if (b[i] === 0x68 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
-                    const payStart = i + 4;
-                    const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
-                    const generalProfile = b[payStart + 1];
-                    const generalTierFlag = (b[payStart + 2] >> 7) & 1;
-                    const generalLevel = b[payStart + 6];
-                    const codecStr = `hvc1.${generalProfile}.${generalLevel}.${generalTierFlag === 0 ? 'L' : 'H'}`;
-                    return {codec: codecStr, description: buf.slice(payStart, payStart + boxSize - 8)};
+
+                if (!this.decoder || this.decoder.state !== 'configured') return;
+
+                const { frameNo, payload, isKey } = this.parseFrag(e.data);
+                if (this._lastReceivedFrameNo > 0 && frameNo > this._lastReceivedFrameNo + 1 && !isKey) {
+                    const missingFrames = frameNo - this._lastReceivedFrameNo - 1;
+                    this._lastReceivedFrameNo = frameNo;
+                    this.enterRecoveryMode(missingFrames);
+                    return;
                 }
-            }
-            return {codec: 'avc1.640028', description: null};
-        }
-
-        parseFrag(buf) {
-            const b = new Uint8Array(buf);
-            const frameNo = Number(new DataView(buf).getBigUint64(0));
-            const data = buf.slice(8);
-
-            for (let i = 0; i < b.length - 16; i++) {
-                if (b[i + 12] === 0x6D && b[i + 13] === 0x64 && b[i + 14] === 0x61 && b[i + 15] === 0x74) {
-                    const size = ((b[i + 8] << 24) | (b[i + 9] << 16) | (b[i + 10] << 8) | b[i + 11]) >>> 0;
-                    const payload = data.slice(i + 8, i + size);
-                    const p = new Uint8Array(payload);
-                    let isKey = false;
-                    let pos = 0;
-                    while (pos + 4 < p.length) {
-                        const nl = ((p[pos] << 24) | (p[pos + 1] << 16) | (p[pos + 2] << 8) | p[pos + 3]) >>> 0;
-                        if (nl === 0 || pos + 4 + nl > p.length) break;
-                        const t = p[pos + 4] & 0x1F;
-                        if (t === 5 || t === 19) {
-                            isKey = true;
-                            break;
-                        }
-                        pos += 4 + nl;
-                    }
-                    return {frameNo, payload, isKey};
+                this._lastReceivedFrameNo = frameNo;
+                if (this._waitingForKeyframe && isKey) {
+                    this.resetDecoderForGap();
                 }
-            }
-            return {frameNo, payload: data, isKey: false};
-        }
+                const displayFrameNo = this.mapFrameNo(frameNo);
+                const decodeQueue = Math.max(this.decoder.decodeQueueSize || 0, this._pendingDecode);
 
-        makeDecoder(codec, description) {
-            if (this.decoder && this.decoder.state !== 'closed') {
-                try { this.decoder.close(); } catch (_) {}
-            }
-            this.decoder = new VideoDecoder({
-                output: (frame) => {
-                    this._pendingDecode = Math.max(0, this._pendingDecode - 1);
-                    const w = frame.displayWidth;
-                    const h = frame.displayHeight;
-                    if (this.canvas.width !== w || this.canvas.height !== h) {
-                        this.canvas.width = w;
-                        this.canvas.height = h;
-                    }
-                    this.ctx.drawImage(frame, 0, 0, w, h);
-                    if (!this._didRenderFrame) {
-                        this._didRenderFrame = true;
-                        if (this._onready) this._onready();
-                    }
-                    frame.close();
-                },
-                error: () => {
+                if (this._waitingForKeyframe && !isKey) {
                     this.dropped++;
-                    this._pendingDecode = Math.max(0, this._pendingDecode - 1);
-                    this._waitingForKeyframe = true;
+                    return;
                 }
-            });
-            const cfg = {codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware'};
-            if (description) cfg.description = description;
-            this.decoder.configure(cfg);
-        }
 
-        render(video) {
-            this._videoEl = video;
-            this.canvas = document.createElement('canvas');
-            this.ctx = this.canvas.getContext('2d', {alpha: false});
-            this._videoEl.srcObject = this.canvas.captureStream();
-            return this;
-        }
+                if (decodeQueue >= this._lateFrameThreshold && !isKey) {
+                    this.enterRecoveryMode();
+                    return;
+                }
 
-        onInfo(fn) {
-            this._oninfo = fn;
-        }
+                if (decodeQueue >= this._maxPendingDecode && !isKey) {
+                    this.enterRecoveryMode();
+                    return;
+                }
 
-        onReady(fn) {
-            this._onready = fn;
-        }
+                const ts = (++this.frameIndex) * 100_000;
 
-        close() {
-            this._closed = true;
-            this._paused = true;
-            clearTimeout(this._reconnectTimer);
-            clearInterval(this._watchdogTimer);
-            this.resetStreamState();
-            if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-                this.ws.close();
+                try {
+                    this._pendingDecode++;
+                    this.decoder.decode(new EncodedVideoChunk({
+                        type: isKey ? 'key' : 'delta',
+                        timestamp: ts,
+                        data: payload
+                    }));
+                    if (isKey) {
+                        this._waitingForKeyframe = false;
+                        this._waitingForKeyframeSince = 0;
+                    }
+                    if (this._oninfo) this._oninfo({ frameNo: displayFrameNo });
+                } catch (_) {
+                    this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                    this.enterRecoveryMode();
+                }
+            }
+
+            checkHealth() {
+                if (this._closed || !this.ws) return;
+                if (this.ws.readyState !== WebSocket.OPEN) return;
+                const idleMs = Date.now() - this._lastActivityAt;
+                const limitMs = this.initDone ? 3000 : 8000;
+                if (idleMs >= limitMs) {
+                    this.ws.close();
+                    return;
+                }
+                if (!this.initDone || !this._didRenderFrame) return;
+                const now = Date.now();
+                const stalledRenderMs = this._lastRenderAt > 0 ? now - this._lastRenderAt : 0;
+                if (this._waitingForKeyframe && this._waitingForKeyframeSince > 0 && now - this._waitingForKeyframeSince >= 60000) {
+                    this.ws.close();
+                    return;
+                }
+                if (!this._waitingForKeyframe && stalledRenderMs >= 60000) {
+                    this.ws.close();
+                }
+            }
+
+            setFrameBase(frameNo) {
+                const base = Math.max(0, Number(frameNo || 0));
+                this._frameOffset = base;
+                this._lastDisplayFrameNo = base;
+            }
+
+            mapFrameNo(rawFrameNo) {
+                const raw = Math.max(0, Number(rawFrameNo || 0));
+                if (this._lastRawFrameNo > 0 && raw > 0 && raw < this._lastRawFrameNo) {
+                    this._frameOffset = Math.max(this._frameOffset, this._lastDisplayFrameNo);
+                }
+                this._lastRawFrameNo = raw;
+                const display = raw > 0 ? raw + this._frameOffset : this._lastDisplayFrameNo;
+                if (display > this._lastDisplayFrameNo) {
+                    this._lastDisplayFrameNo = display;
+                }
+                return this._lastDisplayFrameNo;
+            }
+
+            parseInit(buf) {
+                const b = new Uint8Array(buf);
+                for (let i = 0; i < b.length - 8; i++) {
+                    if (b[i] === 0x61 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
+                        const payStart = i + 4;
+                        const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
+                        const payLen = boxSize - 8;
+                        const profile = b[payStart + 1].toString(16).padStart(2, '0');
+                        const compat = b[payStart + 2].toString(16).padStart(2, '0');
+                        const level = b[payStart + 3].toString(16).padStart(2, '0');
+                        return {
+                            codec: 'avc1.' + profile + compat + level,
+                            description: buf.slice(payStart, payStart + payLen)
+                        };
+                    }
+                    if (b[i] === 0x68 && b[i + 1] === 0x76 && b[i + 2] === 0x63 && b[i + 3] === 0x43) {
+                        const payStart = i + 4;
+                        const boxSize = ((b[i - 4] << 24) | (b[i - 3] << 16) | (b[i - 2] << 8) | b[i - 1]) >>> 0;
+                        const generalProfile = b[payStart + 1];
+                        const generalTierFlag = (b[payStart + 2] >> 7) & 1;
+                        const generalLevel = b[payStart + 6];
+                        const codecStr = `hvc1.${generalProfile}.${generalLevel}.${generalTierFlag === 0 ? 'L' : 'H'}`;
+                        return { codec: codecStr, description: buf.slice(payStart, payStart + boxSize - 8) };
+                    }
+                }
+                return { codec: 'avc1.640028', description: null };
+            }
+
+            parseFrag(buf) {
+                const b = new Uint8Array(buf);
+                const frameNo = Number(new DataView(buf).getBigUint64(0));
+                const data = buf.slice(8);
+
+                for (let i = 0; i < b.length - 16; i++) {
+                    if (b[i + 12] === 0x6D && b[i + 13] === 0x64 && b[i + 14] === 0x61 && b[i + 15] === 0x74) {
+                        const size = ((b[i + 8] << 24) | (b[i + 9] << 16) | (b[i + 10] << 8) | b[i + 11]) >>> 0;
+                        const payload = data.slice(i + 8, i + size);
+                        const p = new Uint8Array(payload);
+                        let isKey = false;
+                        let pos = 0;
+                        while (pos + 4 < p.length) {
+                            const nl = ((p[pos] << 24) | (p[pos + 1] << 16) | (p[pos + 2] << 8) | p[pos + 3]) >>> 0;
+                            if (nl === 0 || pos + 4 + nl > p.length) break;
+                            const t = p[pos + 4] & 0x1F;
+                            if (t === 5 || t === 19) {
+                                isKey = true;
+                                break;
+                            }
+                            pos += 4 + nl;
+                        }
+                        return { frameNo, payload, isKey };
+                    }
+                }
+                return { frameNo, payload: data, isKey: false };
+            }
+
+            makeDecoder(codec, description) {
+                if (this.decoder && this.decoder.state !== 'closed') {
+                    try { this.decoder.close(); } catch (_) { }
+                }
+                this.decoder = new VideoDecoder({
+                    output: (frame) => {
+                        this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                        this._lastRenderAt = Date.now();
+                        this._waitingForKeyframeSince = 0;
+                        let rendered = false;
+                        if (this.renderer) {
+                            try {
+                                rendered = this.renderer.draw(frame);
+                            } catch (_) {
+                                this.renderer.available = false;
+                                this.renderer.enabled = false;
+                                rendered = false;
+                            }
+                        }
+                        if (!rendered && this.ctx) {
+                            const w = frame.displayWidth;
+                            const h = frame.displayHeight;
+                            if (this.canvas.width !== w || this.canvas.height !== h) {
+                                this.canvas.width = w;
+                                this.canvas.height = h;
+                            }
+                            this.ctx.drawImage(frame, 0, 0, w, h);
+                        } else if (rendered && this.ctx) {
+                            const w = frame.displayWidth;
+                            const h = frame.displayHeight;
+                            if (this.canvas.width !== w || this.canvas.height !== h) {
+                                this.canvas.width = w;
+                                this.canvas.height = h;
+                            }
+                            this.ctx.clearRect(0, 0, w, h);
+                            this.ctx.drawImage(this.renderCanvas, 0, 0, w, h);
+                        }
+                        if (!this._didRenderFrame) {
+                            this._didRenderFrame = true;
+                            if (this._onready) this._onready();
+                        }
+                        if (this._onframe) {
+                            this._onframe();
+                        }
+                        frame.close();
+                    },
+                    error: () => {
+                        this._pendingDecode = Math.max(0, this._pendingDecode - 1);
+                        this.enterRecoveryMode();
+                    }
+                });
+                const cfg = { codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' };
+                if (description) cfg.description = description;
+                this.decoder.configure(cfg);
+            }
+
+            async render(video) {
+                this._videoEl = video;
+                this.canvas = document.createElement('canvas');
+                this.renderCanvas = document.createElement('canvas');
+                this.renderer = await createBestRenderer(this.renderCanvas);
+                if (this.renderer) {
+                    this.renderer.setSettings(this._effectSettings);
+                }
+                this.ctx = this.canvas.getContext('2d', { alpha: false });
+                this.renderCtx = this.renderer ? null : this.ctx;
+                this._videoEl.srcObject = this.canvas.captureStream();
+                return this;
+            }
+
+            setEffectSettings(settings) {
+                this._effectSettings = {
+                    ...this._effectSettings,
+                    ...settings,
+                };
+                if (this.renderer) {
+                    this.renderer.setSettings(this._effectSettings);
+                }
+            }
+
+            setGridEnabled(enabled) {
+                this._gridEnabled = Boolean(enabled);
+            }
+
+            onInfo(fn) {
+                this._oninfo = fn;
+            }
+
+            onFrame(fn) {
+                this._onframe = fn;
+            }
+
+            onReady(fn) {
+                this._onready = fn;
+            }
+
+            close() {
+                this._closed = true;
+                this._paused = true;
+                clearTimeout(this._reconnectTimer);
+                clearInterval(this._watchdogTimer);
+                this.resetStreamState();
+                if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+                    this.ws.close();
+                }
             }
         }
-    }
 
-    function formatBytes(bytes) {
-        const value = Number(bytes || 0);
-        if (value < 1024) return `${value} B`;
-        const units = ['KB', 'MB', 'GB', 'TB'];
-        let size = value / 1024;
-        let unit = units[0];
-        for (let i = 1; i < units.length && size >= 1024; i++) {
-            size /= 1024;
-            unit = units[i];
+        function formatBytes(bytes) {
+            const value = Number(bytes || 0);
+            if (value < 1024) return `${value} B`;
+            const units = ['KB', 'MB', 'GB', 'TB'];
+            let size = value / 1024;
+            let unit = units[0];
+            for (let i = 1; i < units.length && size >= 1024; i++) {
+                size /= 1024;
+                unit = units[i];
+            }
+            return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
         }
-        return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
-    }
 
-    function formatRateFromKbps(kbps) {
-        const bytesPerSecond = (Number(kbps || 0) * 1000) / 8;
-        return `${formatBytes(bytesPerSecond)}/s`;
-    }
+        function formatRateFromKbps(kbps) {
+            const bytesPerSecond = (Number(kbps || 0) * 1000) / 8;
+            return `${formatBytes(bytesPerSecond)}/s`;
+        }
 
-    function findStream(message, name) {
-        return (message.streams || []).find((stream) => stream.name === name) || null;
-    }
+        function findStream(message, name) {
+            return (message.streams || []).find((stream) => stream.name === name) || null;
+        }
 
-    function qualitySignature(stream) {
-        return (stream.renditions || [])
-            .map((rendition) => `${rendition.name}:${Math.round(rendition.bitrateKbps || 0)}`)
-            .join('|');
-    }
+        function qualitySignature(stream) {
+            return (stream.renditions || [])
+                .map((rendition) => `${rendition.name}:${Math.round(rendition.bitrateKbps || 0)}`)
+                .join('|');
+        }
 
-    function applyQualityOptions(stream, requestedQuality) {
-        const select = document.getElementById('quality-select');
-        const nextSignature = qualitySignature(stream);
-        if (select.dataset.signature === nextSignature) {
+        function applyQualityOptions(stream, requestedQuality) {
+            const select = document.getElementById('quality-select');
+            const nextSignature = qualitySignature(stream);
+            if (select.dataset.signature === nextSignature) {
+                if ((stream.renditions || []).some((item) => item.name === requestedQuality)) {
+                    select.value = requestedQuality;
+                } else if (!requestedQuality) {
+                    select.value = '';
+                }
+                return;
+            }
+            const current = select.value;
+            const options = ['<option value="">Default</option>'];
+            for (const rendition of (stream.renditions || [])) {
+                options.push(`<option value="${rendition.name}">${rendition.name} (${Math.round(rendition.bitrateKbps || 0)} kbps)</option>`);
+            }
+            select.innerHTML = options.join('');
+            select.dataset.signature = nextSignature;
             if ((stream.renditions || []).some((item) => item.name === requestedQuality)) {
                 select.value = requestedQuality;
-            } else if (!requestedQuality) {
+            } else if (current && (stream.renditions || []).some((item) => item.name === current)) {
+                select.value = current;
+            } else {
                 select.value = '';
             }
-            return;
         }
-        const current = select.value;
-        const options = ['<option value="">Default</option>'];
-        for (const rendition of (stream.renditions || [])) {
-            options.push(`<option value="${rendition.name}">${rendition.name} (${Math.round(rendition.bitrateKbps || 0)} kbps)</option>`);
-        }
-        select.innerHTML = options.join('');
-        select.dataset.signature = nextSignature;
-        if ((stream.renditions || []).some((item) => item.name === requestedQuality)) {
-            select.value = requestedQuality;
-        } else if (current && (stream.renditions || []).some((item) => item.name === current)) {
-            select.value = current;
-        } else {
-            select.value = '';
-        }
-    }
 
-    function streamSignature(message) {
-        return (message.streams || []).map((stream) => stream.name).join('|');
-    }
-
-    function applyStreamOptions(message, requestedName) {
-        const select = document.getElementById('stream-select');
-        const nextSignature = streamSignature(message);
-        if (select.dataset.signature !== nextSignature) {
-            const current = select.value;
-            const options = (message.streams || []).map((stream) => `<option value="${stream.name}">${stream.name}</option>`);
-            select.innerHTML = options.join('') || '<option value="">No streams</option>';
-            select.dataset.signature = nextSignature;
-            select.value = requestedName || current || '';
-        } else if (requestedName) {
-            select.value = requestedName;
+        function streamSignature(message) {
+            return (message.streams || []).map((stream) => stream.name).join('|');
         }
-    }
 
-    function selectedQuality(stream, requestedQuality) {
-        const renditions = stream.renditions || [];
-        if (!requestedQuality || renditions.length === 0) {
-            return stream.activeRendition || 'default';
+        function applyStreamOptions(message, requestedName) {
+            const select = document.getElementById('stream-select');
+            const nextSignature = streamSignature(message);
+            if (select.dataset.signature !== nextSignature) {
+                const current = select.value;
+                const options = (message.streams || []).map((stream) => `<option value="${stream.name}">${stream.name}</option>`);
+                select.innerHTML = options.join('') || '<option value="">No streams</option>';
+                select.dataset.signature = nextSignature;
+                select.value = requestedName || current || '';
+            } else if (requestedName) {
+                select.value = requestedName;
+            }
         }
-        const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
-        if (match) return match.name;
-        return stream.activeRendition || requestedQuality;
-    }
 
-    function selectedBitrate(stream, requestedQuality) {
-        const renditions = stream.renditions || [];
-        if (requestedQuality && renditions.length > 0) {
+        function selectedQuality(stream, requestedQuality) {
+            const renditions = stream.renditions || [];
+            if (!requestedQuality || renditions.length === 0) {
+                return stream.activeRendition || 'default';
+            }
             const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
-            if (match?.stats?.bitrateKbps) return match.stats.bitrateKbps;
-            if (match && match.bitrateKbps) return match.bitrateKbps;
+            if (match) return match.name;
+            return stream.activeRendition || requestedQuality;
         }
-        return stream.stats.bitrateKbps || stream.bitrateKbps || 0;
-    }
 
-    function selectedStats(stream, requestedQuality) {
-        const renditions = stream.renditions || [];
-        if (requestedQuality && renditions.length > 0) {
-            const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
-            if (match?.stats) return match.stats;
-        }
-        return stream.stats || {};
-    }
-
-    function applyStream(stream, requestedQuality) {
-        const stats = selectedStats(stream, requestedQuality);
-        document.getElementById('stream-title').textContent = stream.name;
-        document.getElementById('stream-meta').textContent = `${stream.sourceType.toUpperCase()} · ${stream.url}`;
-        document.getElementById('codec').textContent = stats.codec || stream.codec || '-';
-        document.getElementById('resolution').textContent = `${stats.width || 0}x${stats.height || 0}`;
-        const liveBitrateKbps = selectedBitrate(stream, requestedQuality);
-        document.getElementById('framerate').textContent = Math.round(stats.framerate || 0);
-        document.getElementById('bitrate').textContent = Math.round(liveBitrateKbps);
-        document.getElementById('quality').textContent = selectedQuality(stream, requestedQuality);
-        document.getElementById('bytes').textContent = formatRateFromKbps(liveBitrateKbps);
-    }
-
-    function modeLabel(mode) {
-        const fps = (mode.fps || []).map((v) => Math.round(Number(v || 0))).filter(Boolean);
-        const fpsText = fps.length > 0 ? ` @ ${fps.join('/')}` : '';
-        return `${mode.width}x${mode.height}${fpsText} fps`;
-    }
-
-    function closestModeIndex(modes, target) {
-        if (!Array.isArray(modes) || modes.length === 0) return 0;
-        const width = Number(target?.width || 0);
-        const height = Number(target?.height || 0);
-        const fps = Number(target?.frameRate || target?.framerate || 0);
-        let bestIndex = 0;
-        let bestScore = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < modes.length; i++) {
-            const mode = modes[i];
-            const modeWidth = Number(mode.width || 0);
-            const modeHeight = Number(mode.height || 0);
-            const modeFps = (mode.fps || []).map((v) => Number(v || 0));
-            const fpsScore = modeFps.length > 0 ? Math.min(...modeFps.map((v) => Math.abs(v - fps))) : 1000;
-            const score = Math.abs(modeWidth - width) + Math.abs(modeHeight - height) + fpsScore * 10;
-            if (score < bestScore) {
-                bestScore = score;
-                bestIndex = i;
+        function selectedBitrate(stream, requestedQuality) {
+            const renditions = stream.renditions || [];
+            if (requestedQuality && renditions.length > 0) {
+                const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
+                if (match?.stats?.bitrateKbps) return match.stats.bitrateKbps;
+                if (match && match.bitrateKbps) return match.bitrateKbps;
             }
+            return stream.stats.bitrateKbps || stream.bitrateKbps || 0;
         }
-        return bestIndex;
-    }
 
-    function applyCapabilityOptions(capsResponse, target, lockedIndex = null) {
-        const select = document.getElementById('mode-select');
-        if (!capsResponse || capsResponse.sourceType !== 'usb') {
-            select.innerHTML = '<option value="">Modes unavailable for this source</option>';
-            select.disabled = true;
-            return;
+        function selectedStats(stream, requestedQuality) {
+            const renditions = stream.renditions || [];
+            if (requestedQuality && renditions.length > 0) {
+                const match = renditions.find((item) => String(item.name || '').toLowerCase() === requestedQuality.toLowerCase());
+                if (match?.stats) return match.stats;
+            }
+            return stream.stats || {};
         }
-        const caps = capsResponse.capabilities;
-        const modes = Array.isArray(caps?.modes) ? caps.modes : [];
-        if (modes.length === 0) {
-            select.innerHTML = '<option value="">No modes reported</option>';
-            select.disabled = true;
-            return;
-        }
-        select.innerHTML = modes.map((mode, index) => `<option value="${index}">${modeLabel(mode)}</option>`).join('');
-        select.disabled = false;
-        if (lockedIndex !== null && lockedIndex >= 0 && lockedIndex < modes.length) {
-            select.value = String(lockedIndex);
-            return;
-        }
-        select.value = String(closestModeIndex(modes, target));
-    }
 
-    async function main() {
-        let activeName = decodeURIComponent(location.pathname.split('/').pop() || '');
-        let activeQuality = new URLSearchParams(location.search).get('quality') || '';
-        let pendingQuality = '';
-        let pendingName = '';
-        const titleEl = document.getElementById('stream-title');
-        const metaEl = document.getElementById('stream-meta');
-        const streamSelect = document.getElementById('stream-select');
-        const qualitySelect = document.getElementById('quality-select');
-        const videoA = document.getElementById('stream-video-a');
-        const videoB = document.getElementById('stream-video-b');
-        let lastStatusMessage = {streams: []};
-        const capabilityCache = new Map();
-        let pendingModeIndex = null;
+        function applyStream(stream, requestedQuality) {
+            const stats = selectedStats(stream, requestedQuality);
+            document.getElementById('stream-title').textContent = stream.name;
+            document.getElementById('stream-meta').textContent = `${stream.sourceType.toUpperCase()} · ${stream.url}`;
+            document.getElementById('codec').textContent = stats.codec || stream.codec || '-';
+            document.getElementById('resolution').textContent = `${stats.width || 0}x${stats.height || 0}`;
+            const liveBitrateKbps = selectedBitrate(stream, requestedQuality);
+            document.getElementById('framerate').textContent = Math.round(stats.framerate || 0);
+            document.getElementById('bitrate').textContent = Math.round(liveBitrateKbps);
+            document.getElementById('quality').textContent = selectedQuality(stream, requestedQuality);
+            document.getElementById('bytes').textContent = formatRateFromKbps(liveBitrateKbps);
+        }
 
-        const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-        const streamWsUrl = (name, quality) => {
-            const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
-            return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
-        };
-        const loadCapabilities = async (streamName) => {
-            if (!streamName) return;
-            if (capabilityCache.has(streamName)) {
-                const stream = findStream(lastStatusMessage, streamName) || {};
-                applyCapabilityOptions(capabilityCache.get(streamName), stream, pendingModeIndex);
+        function modeLabel(mode) {
+            const fps = (mode.fps || []).map((v) => Math.round(Number(v || 0))).filter(Boolean);
+            const fpsText = fps.length > 0 ? ` @ ${fps.join('/')}` : '';
+            return `${mode.width}x${mode.height}${fpsText} fps`;
+        }
+
+        function closestModeIndex(modes, target) {
+            if (!Array.isArray(modes) || modes.length === 0) return 0;
+            const width = Number(target?.width || 0);
+            const height = Number(target?.height || 0);
+            const fps = Number(target?.frameRate || target?.framerate || 0);
+            let bestIndex = 0;
+            let bestScore = Number.POSITIVE_INFINITY;
+            for (let i = 0; i < modes.length; i++) {
+                const mode = modes[i];
+                const modeWidth = Number(mode.width || 0);
+                const modeHeight = Number(mode.height || 0);
+                const modeFps = (mode.fps || []).map((v) => Number(v || 0));
+                const fpsScore = modeFps.length > 0 ? Math.min(...modeFps.map((v) => Math.abs(v - fps))) : 1000;
+                const score = Math.abs(modeWidth - width) + Math.abs(modeHeight - height) + fpsScore * 10;
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        }
+
+        function applyCapabilityOptions(capsResponse, target, lockedIndex = null) {
+            const select = document.getElementById('mode-select');
+            if (!capsResponse || capsResponse.sourceType !== 'usb') {
+                select.innerHTML = '<option value="">Modes unavailable for this source</option>';
+                select.disabled = true;
                 return;
             }
-            try {
-                const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/capabilities`);
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
-                const payload = await response.json();
-                capabilityCache.set(streamName, payload);
-                if ((pendingName || activeName) === streamName) {
-                    const stream = findStream(lastStatusMessage, streamName) || {};
-                    applyCapabilityOptions(payload, stream, pendingModeIndex);
-                }
-            } catch (error) {
-                const payload = {sourceType: '', error: error.message || String(error)};
-                capabilityCache.set(streamName, payload);
-                if ((pendingName || activeName) === streamName) {
-                    applyCapabilityOptions(payload, {});
-                }
-            }
-        };
-        const bindInfo = (player) => player.onInfo((info) => {
-            if (info.codec) document.getElementById('codec').textContent = info.codec;
-            if (info.frameNo !== undefined) {
-                const next = Math.max(displayedFrameNo, Number(info.frameNo || 0));
-                displayedFrameNo = next;
-                document.getElementById('frame-no').textContent = next;
-            }
-        });
-        const showVideo = (video) => {
-            videoA.classList.toggle('is-hidden', video !== videoA);
-            videoB.classList.toggle('is-hidden', video !== videoB);
-        };
-        let activeVideo = videoA;
-        let standbyVideo = videoB;
-        let displayedFrameNo = 0;
-        let activePlayer = new StreamPlayer(streamWsUrl(activeName, activeQuality));
-        activePlayer.render(activeVideo);
-        bindInfo(activePlayer);
-        let pendingPlayer = null;
-        let pendingSwapTimer = null;
-        let swapToken = 0;
-        const setUrlState = (name, quality) => {
-            const url = new URL(location.href);
-            const parts = url.pathname.split('/');
-            parts[parts.length - 1] = encodeURIComponent(name);
-            url.pathname = parts.join('/');
-            if (quality) {
-                url.searchParams.set('quality', quality);
-            } else {
-                url.searchParams.delete('quality');
-            }
-            history.replaceState(null, '', url);
-        };
-        const swapStream = (nextName, nextQuality) => {
-            swapToken++;
-            const token = swapToken;
-            const nextVideo = standbyVideo;
-            const nextPlayer = new StreamPlayer(streamWsUrl(nextName, nextQuality));
-            if (nextName === activeName) {
-                nextPlayer.setFrameBase(displayedFrameNo);
-            } else {
-                nextPlayer.setFrameBase(0);
-            }
-            nextPlayer.render(nextVideo);
-            bindInfo(nextPlayer);
-            nextPlayer.onReady(() => {
-                if (token !== swapToken) {
-                    nextPlayer.close();
-                    return;
-                }
-                const oldPlayer = activePlayer;
-                const nameChanged = nextName !== activeName;
-                activeName = nextName;
-                activeQuality = nextQuality;
-                pendingName = '';
-                pendingQuality = '';
-                activePlayer = nextPlayer;
-                pendingPlayer = null;
-                clearTimeout(pendingSwapTimer);
-                pendingSwapTimer = null;
-                showVideo(nextVideo);
-                standbyVideo = activeVideo;
-                activeVideo = nextVideo;
-                if (nameChanged) {
-                    displayedFrameNo = 0;
-                    document.getElementById('frame-no').textContent = '0';
-                }
-                streamSelect.disabled = false;
-                streamSelect.value = activeName;
-                qualitySelect.disabled = false;
-                qualitySelect.value = activeQuality;
-                setUrlState(activeName, activeQuality);
-                loadCapabilities(activeName);
-                setTimeout(() => oldPlayer.close(), 120);
-            });
-            if (pendingPlayer) {
-                pendingPlayer.close();
-            }
-            pendingPlayer = nextPlayer;
-            streamSelect.disabled = true;
-            qualitySelect.disabled = true;
-            clearTimeout(pendingSwapTimer);
-            pendingSwapTimer = setTimeout(() => {
-                if (token !== swapToken) {
-                    return;
-                }
-                if (pendingPlayer) {
-                    pendingPlayer.close();
-                    pendingPlayer = null;
-                }
-                pendingName = '';
-                pendingQuality = '';
-                streamSelect.disabled = false;
-                streamSelect.value = activeName;
-                qualitySelect.disabled = false;
-                qualitySelect.value = activeQuality;
-                loadCapabilities(activeName);
-            }, 10000);
-        };
-        window.addEventListener('beforeunload', () => {
-            activePlayer.close();
-            if (pendingPlayer) pendingPlayer.close();
-            clearTimeout(pendingSwapTimer);
-        }, {once: true});
-        const applySelectedQuality = () => {
-            const nextQuality = qualitySelect.value;
-            if (nextQuality === activeQuality) {
+            const caps = capsResponse.capabilities;
+            const modes = Array.isArray(caps?.modes) ? caps.modes : [];
+            if (modes.length === 0) {
+                select.innerHTML = '<option value="">No modes reported</option>';
+                select.disabled = true;
                 return;
             }
-            pendingQuality = nextQuality;
-            swapStream(activeName, nextQuality);
-        };
-        const applySelectedStream = () => {
-            const nextName = streamSelect.value;
-            if (!nextName || nextName === activeName) {
+            select.innerHTML = modes.map((mode, index) => `<option value="${index}">${modeLabel(mode)}</option>`).join('');
+            select.disabled = false;
+            if (lockedIndex !== null && lockedIndex >= 0 && lockedIndex < modes.length) {
+                select.value = String(lockedIndex);
                 return;
             }
-            const nextStream = findStream(lastStatusMessage, nextName);
-            let nextQuality = '';
-            if (nextStream && activeQuality && (nextStream.renditions || []).some((item) => item.name === activeQuality)) {
-                nextQuality = activeQuality;
-            }
-            pendingName = nextName;
-            pendingQuality = nextQuality;
-            swapStream(nextName, nextQuality);
-        };
-        const applySelectedMode = async () => {
-            const streamName = pendingName || activeName;
-            const capsResponse = capabilityCache.get(streamName);
-            const modes = capsResponse?.capabilities?.modes || [];
-            const selectedIndex = Number(document.getElementById('mode-select').value);
-            const selectedMode = modes[selectedIndex];
-            if (!selectedMode) {
-                return;
-            }
-            try {
-                pendingModeIndex = selectedIndex;
-                document.getElementById('mode-select').disabled = true;
-                const fps = Array.isArray(selectedMode.fps) && selectedMode.fps.length > 0 ? Number(selectedMode.fps[selectedMode.fps.length - 1]) : null;
-                const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/mode`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        width: Number(selectedMode.width || 0),
-                        height: Number(selectedMode.height || 0),
-                        frameRate: fps || null,
-                    }),
-                });
-                if (!response.ok) {
-                    throw new Error(await response.text() || `HTTP ${response.status}`);
-                }
-                capabilityCache.delete(streamName);
-                pendingName = streamName;
-                pendingQuality = activeQuality;
-                swapStream(streamName, activeQuality);
-            } catch (error) {
-                metaEl.textContent = error.message || String(error);
-                pendingModeIndex = null;
-                document.getElementById('mode-select').disabled = false;
-            }
-        };
-        streamSelect.addEventListener('change', applySelectedStream);
-        streamSelect.addEventListener('input', applySelectedStream);
-        qualitySelect.addEventListener('change', applySelectedQuality);
-        qualitySelect.addEventListener('input', applySelectedQuality);
-        document.getElementById('mode-select').addEventListener('change', applySelectedMode);
+            select.value = String(closestModeIndex(modes, target));
+        }
 
-        let infoWs = null;
-        let reconnectTimer = null;
-        let reconnectDelay = 1000;
-        const connectInfoSocket = () => {
-            infoWs = new WebSocket(`${protocol}://${location.host}/ws/info`);
-            infoWs.onopen = () => {
-                reconnectDelay = 1000;
+        function clamp01(value) {
+            return Math.min(1, Math.max(0, Number(value) || 0));
+        }
+
+        function defaultDeskPoints() {
+            return [
+                { x: 0.2, y: 0.2, label: 'A' },
+                { x: 0.8, y: 0.24, label: 'B' },
+                { x: 0.88, y: 0.82, label: 'C' },
+                { x: 0.12, y: 0.78, label: 'D' },
+            ];
+        }
+
+        function cloneDeskPoints(points) {
+            return (Array.isArray(points) ? points : []).map((point, index) => ({
+                x: clamp01(point?.x),
+                y: clamp01(point?.y),
+                label: point?.label || defaultDeskPoints()[index]?.label || String(index + 1),
+            }));
+        }
+
+        function triangleArea(a, b, c) {
+            return Math.abs((a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y)) / 2);
+        }
+
+        function triangleTransform(srcTri, dstTri) {
+            const [s0, s1, s2] = srcTri;
+            const [d0, d1, d2] = dstTri;
+            const denom = s0.x * (s1.y - s2.y) + s1.x * (s2.y - s0.y) + s2.x * (s0.y - s1.y);
+            if (Math.abs(denom) < 1e-6) {
+                return null;
+            }
+            return {
+                a: (d0.x * (s1.y - s2.y) + d1.x * (s2.y - s0.y) + d2.x * (s0.y - s1.y)) / denom,
+                b: (d0.y * (s1.y - s2.y) + d1.y * (s2.y - s0.y) + d2.y * (s0.y - s1.y)) / denom,
+                c: (d0.x * (s2.x - s1.x) + d1.x * (s0.x - s2.x) + d2.x * (s1.x - s0.x)) / denom,
+                d: (d0.y * (s2.x - s1.x) + d1.y * (s0.x - s2.x) + d2.y * (s1.x - s0.x)) / denom,
+                e: (d0.x * (s1.x * s2.y - s2.x * s1.y) + d1.x * (s2.x * s0.y - s0.x * s2.y) + d2.x * (s0.x * s1.y - s1.x * s0.y)) / denom,
+                f: (d0.y * (s1.x * s2.y - s2.x * s1.y) + d1.y * (s2.x * s0.y - s0.x * s2.y) + d2.y * (s0.x * s1.y - s1.x * s0.y)) / denom,
             };
-            infoWs.onmessage = (event) => {
+        }
+
+        function drawImageTriangle(ctx, image, srcTri, dstTri) {
+            const transform = triangleTransform(srcTri, dstTri);
+            if (!transform || triangleArea(srcTri[0], srcTri[1], srcTri[2]) < 0.5 || triangleArea(dstTri[0], dstTri[1], dstTri[2]) < 0.5) {
+                return;
+            }
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(dstTri[0].x, dstTri[0].y);
+            ctx.lineTo(dstTri[1].x, dstTri[1].y);
+            ctx.lineTo(dstTri[2].x, dstTri[2].y);
+            ctx.closePath();
+            ctx.clip();
+            ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
+            ctx.drawImage(image, 0, 0);
+            ctx.restore();
+        }
+
+        function bilerpQuad(quad, u, v) {
+            const p0 = quad[0];
+            const p1 = quad[1];
+            const p2 = quad[2];
+            const p3 = quad[3];
+            const um = 1 - u;
+            const vm = 1 - v;
+            return {
+                x: p0.x * um * vm + p1.x * u * vm + p2.x * u * v + p3.x * um * v,
+                y: p0.y * um * vm + p1.y * u * vm + p2.y * u * v + p3.y * um * v,
+            };
+        }
+
+        function drawImageQuadMesh(ctx, image, srcQuad, dstRect, stepsX = 24, stepsY = 24) {
+            const sx = Math.max(1, Math.floor(stepsX));
+            const sy = Math.max(1, Math.floor(stepsY));
+            const dstQuad = [
+                { x: dstRect.x, y: dstRect.y },
+                { x: dstRect.x + dstRect.width, y: dstRect.y },
+                { x: dstRect.x + dstRect.width, y: dstRect.y + dstRect.height },
+                { x: dstRect.x, y: dstRect.y + dstRect.height },
+            ];
+            for (let y = 0; y < sy; y++) {
+                const v0 = y / sy;
+                const v1 = (y + 1) / sy;
+                for (let x = 0; x < sx; x++) {
+                    const u0 = x / sx;
+                    const u1 = (x + 1) / sx;
+                    const s00 = bilerpQuad(srcQuad, u0, v0);
+                    const s10 = bilerpQuad(srcQuad, u1, v0);
+                    const s11 = bilerpQuad(srcQuad, u1, v1);
+                    const s01 = bilerpQuad(srcQuad, u0, v1);
+                    const d00 = bilerpQuad(dstQuad, u0, v0);
+                    const d10 = bilerpQuad(dstQuad, u1, v0);
+                    const d11 = bilerpQuad(dstQuad, u1, v1);
+                    const d01 = bilerpQuad(dstQuad, u0, v1);
+                    drawImageTriangle(ctx, image, [s00, s10, s11], [d00, d10, d11]);
+                    drawImageTriangle(ctx, image, [s00, s11, s01], [d00, d11, d01]);
+                }
+            }
+        }
+
+        function formatDeskRatio(width, height) {
+            const safeWidth = Number(width) || 0;
+            const safeHeight = Number(height) || 0;
+            if (safeWidth <= 0 || safeHeight <= 0) {
+                return '-';
+            }
+            const normalizedHeight = 1;
+            const normalizedWidth = safeWidth / safeHeight;
+            return `${normalizedWidth.toFixed(2)}:1`;
+        }
+
+        function textureToClip(point) {
+            return {
+                x: clamp01(point?.x) * 2 - 1,
+                y: 1 - clamp01(point?.y) * 2,
+            };
+        }
+
+        function clipToTexture(point) {
+            return {
+                x: clamp01((Number(point?.x || 0) + 1) / 2),
+                y: clamp01((1 - Number(point?.y || 0)) / 2),
+            };
+        }
+
+        function sampleClipFromOutputClip(point, effectSettings) {
+            const enabled = Boolean(effectSettings?.enabled);
+            const scale = enabled ? Number(effectSettings?.scale || 1) : 1;
+            const fx = enabled ? Number(effectSettings?.fx || 0) : 0;
+            const fy = enabled ? Number(effectSettings?.fy || 0) : 0;
+            const lensA = Number(effectSettings?.lensA || 1);
+            const lensB = Number(effectSettings?.lensB || 1);
+            let x = Number(point?.x || 0);
+            let y = Number(point?.y || 0);
+            x = x + (((y * y) / scale) * x / scale) * -fx;
+            y = y + (((x * x) / scale) * y / scale) * -fy;
+            return {
+                x: (x * lensA) / scale,
+                y: (y * lensB) / scale,
+            };
+        }
+
+        function sourceToDisplayTexture(point, effectSettings) {
+            if (!effectSettings?.enabled) {
+                return {
+                    x: clamp01(point?.x),
+                    y: clamp01(point?.y),
+                };
+            }
+            const targetClip = textureToClip(point);
+            let guess = { ...targetClip };
+            for (let i = 0; i < 12; i++) {
+                const mapped = sampleClipFromOutputClip(guess, effectSettings);
+                guess.x += (targetClip.x - mapped.x) * 0.7;
+                guess.y += (targetClip.y - mapped.y) * 0.7;
+                guess.x = Math.max(-1.2, Math.min(1.2, guess.x));
+                guess.y = Math.max(-1.2, Math.min(1.2, guess.y));
+            }
+            return clipToTexture(guess);
+        }
+
+        function displayToSourceTexture(point, effectSettings) {
+            if (!effectSettings?.enabled) {
+                return {
+                    x: clamp01(point?.x),
+                    y: clamp01(point?.y),
+                };
+            }
+            const outputClip = textureToClip(point);
+            return clipToTexture(sampleClipFromOutputClip(outputClip, effectSettings));
+        }
+
+        async function main() {
+            const initialParams = new URLSearchParams(location.search);
+            let activeName = decodeURIComponent(location.pathname.split('/').pop() || '');
+            let activeQuality = initialParams.get('quality') || '';
+            let pendingQuality = '';
+            let pendingName = '';
+            const titleEl = document.getElementById('stream-title');
+            const metaEl = document.getElementById('stream-meta');
+            const streamSelect = document.getElementById('stream-select');
+            const qualitySelect = document.getElementById('quality-select');
+            const fisheyeEnabled = document.getElementById('fisheye-enabled');
+            const fisheyeEnabledCollapsed = document.getElementById('fisheye-enabled-collapsed');
+            const fisheyeGridEnabled = document.getElementById('fisheye-grid-enabled');
+            const fisheyeFx = document.getElementById('fisheye-fx');
+            const fisheyeFy = document.getElementById('fisheye-fy');
+            const fisheyeScale = document.getElementById('fisheye-scale');
+            const fisheyeFxInput = document.getElementById('fisheye-fx-input');
+            const fisheyeFyInput = document.getElementById('fisheye-fy-input');
+            const fisheyeScaleInput = document.getElementById('fisheye-scale-input');
+            const deskViewEnabled = document.getElementById('desk-view-enabled');
+            const deskViewReset = document.getElementById('desk-view-reset');
+            const headerEl = document.getElementById('stream-header');
+            const headerToggle = document.getElementById('header-toggle');
+            const headerResizeHandle = document.getElementById('header-resize-handle');
+            const viewerEl = document.querySelector('.viewer');
+            const videoA = document.getElementById('stream-video-a');
+            const videoB = document.getElementById('stream-video-b');
+            const gridOverlay = document.getElementById('viewer-grid-overlay');
+            const deskOverlay = document.getElementById('desk-overlay');
+            const deskPreviewPanel = document.getElementById('desk-preview-panel');
+            const deskPreviewResize = document.getElementById('desk-preview-resize');
+            const deskPreviewCanvas = document.getElementById('desk-preview-canvas');
+            const deskPreviewMeta = document.getElementById('desk-preview-meta');
+            const deskPreviewFullscreen = document.getElementById('desk-preview-fullscreen');
+            let lastStatusMessage = { streams: [] };
+            const capabilityCache = new Map();
+            let pendingModeIndex = null;
+
+            const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+            const headerStorageKey = 'webrtp:stream-header-layout';
+            const deskStorageKey = 'webrtp:desk-view-points';
+            const deskPanelStorageKey = 'webrtp:desk-view-panel-layout';
+            const effectDefaults = {
+                enabled: false,
+                fx: 0,
+                fy: 0,
+                scale: 1,
+                lensA: 1,
+                lensB: 1,
+            };
+            const effectState = {
+                ...effectDefaults,
+            };
+            const deskState = {
+                enabled: true,
+                points: defaultDeskPoints(),
+                stage: null,
+                layer: null,
+                polygon: null,
+                dimmer: null,
+                handles: [],
+                handleDragState: null,
+                previewRenderer: null,
+                dragState: null,
+                resizeState: null,
+            };
+            const updateEffectValue = (id, value, digits = 2) => {
+                document.getElementById(id).textContent = Number(value || 0).toFixed(digits);
+            };
+            const clampEffectValue = (value, min, max, fallback) => {
+                const num = Number(value);
+                if (!Number.isFinite(num)) {
+                    return fallback;
+                }
+                return Math.min(max, Math.max(min, num));
+            };
+            const setEffectControlValue = (slider, input, value) => {
+                const normalized = Number(value).toFixed(2);
+                slider.value = String(value);
+                input.value = normalized;
+            };
+            const applyEffectStateToPlayer = (player) => {
+                if (!player) {
+                    return;
+                }
+                player.setEffectSettings(effectState);
+            };
+            const applyGridStateToPlayer = (player) => {
+                if (!player) {
+                    return;
+                }
+                player.setGridEnabled(fisheyeGridEnabled.checked);
+            };
+            const setEffectEnabled = (enabled) => {
+                effectState.enabled = Boolean(enabled);
+                fisheyeEnabled.checked = effectState.enabled;
+                fisheyeEnabledCollapsed.checked = effectState.enabled;
+            };
+            const updateEffectQueryParams = () => {
+                const url = new URL(location.href);
+                if (effectState.enabled) {
+                    url.searchParams.set('distort', '1');
+                } else {
+                    url.searchParams.delete('distort');
+                }
+                url.searchParams.set('fx', effectState.fx.toFixed(2));
+                url.searchParams.set('fy', effectState.fy.toFixed(2));
+                url.searchParams.set('scale', effectState.scale.toFixed(2));
+                history.replaceState(null, '', url);
+            };
+            const scheduleEffectQueryParamsUpdate = () => {
+                clearTimeout(effectQueryUpdateTimer);
+                effectQueryUpdateTimer = setTimeout(() => {
+                    updateEffectQueryParams();
+                }, 150);
+            };
+            const syncEffectState = () => {
+                effectState.fx = clampEffectValue(fisheyeFx.value, -0.25, 0.25, effectDefaults.fx);
+                effectState.fy = clampEffectValue(fisheyeFy.value, -0.25, 0.25, effectDefaults.fy);
+                effectState.scale = clampEffectValue(fisheyeScale.value, 0.5, 3, effectDefaults.scale);
+                setEffectControlValue(fisheyeFx, fisheyeFxInput, effectState.fx);
+                setEffectControlValue(fisheyeFy, fisheyeFyInput, effectState.fy);
+                setEffectControlValue(fisheyeScale, fisheyeScaleInput, effectState.scale);
+                updateEffectValue('fisheye-fx-value', effectState.fx);
+                updateEffectValue('fisheye-fy-value', effectState.fy);
+                updateEffectValue('fisheye-scale-value', effectState.scale);
+                applyEffectStateToPlayer(activePlayer);
+                applyEffectStateToPlayer(pendingPlayer);
+                drawGridOverlay();
+                syncDeskOverlay();
+                drawDeskPreview();
+                scheduleEffectQueryParamsUpdate();
+            };
+            const syncEffectFromInput = (input, slider, min, max, fallback) => {
+                const value = clampEffectValue(input.value, min, max, fallback);
+                slider.value = String(value);
+                input.value = value.toFixed(2);
+                syncEffectState();
+            };
+            const resetEffectControl = (key) => {
+                if (key === 'fx') {
+                    fisheyeFx.value = String(effectDefaults.fx);
+                    fisheyeFxInput.value = effectDefaults.fx.toFixed(2);
+                } else if (key === 'fy') {
+                    fisheyeFy.value = String(effectDefaults.fy);
+                    fisheyeFyInput.value = effectDefaults.fy.toFixed(2);
+                } else if (key === 'scale') {
+                    fisheyeScale.value = String(effectDefaults.scale);
+                    fisheyeScaleInput.value = effectDefaults.scale.toFixed(2);
+                }
+                syncEffectState();
+            };
+            const streamWsUrl = (name, quality) => {
+                const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
+                return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
+            };
+            const loadCapabilities = async (streamName) => {
+                if (!streamName) return;
+                if (capabilityCache.has(streamName)) {
+                    const stream = findStream(lastStatusMessage, streamName) || {};
+                    applyCapabilityOptions(capabilityCache.get(streamName), stream, pendingModeIndex);
+                    return;
+                }
                 try {
-                    const message = JSON.parse(event.data);
-                    lastStatusMessage = message;
-                    applyStreamOptions(message, pendingName || activeName);
-                    const stream = findStream(message, pendingName || activeName);
-                    if (!stream) {
-                        titleEl.textContent = 'Stream not found';
-                        metaEl.textContent = 'This stream is not currently available';
+                    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/capabilities`);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    const payload = await response.json();
+                    capabilityCache.set(streamName, payload);
+                    if ((pendingName || activeName) === streamName) {
+                        const stream = findStream(lastStatusMessage, streamName) || {};
+                        applyCapabilityOptions(payload, stream, pendingModeIndex);
+                    }
+                } catch (error) {
+                    const payload = { sourceType: '', error: error.message || String(error) };
+                    capabilityCache.set(streamName, payload);
+                    if ((pendingName || activeName) === streamName) {
+                        applyCapabilityOptions(payload, {});
+                    }
+                }
+            };
+            const readStoredDeskPoints = () => {
+                try {
+                    const raw = sessionStorage.getItem(deskStorageKey);
+                    if (!raw) {
+                        return null;
+                    }
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed) || parsed.length !== 4) {
+                        return null;
+                    }
+                    return cloneDeskPoints(parsed);
+                } catch (_) {
+                    return null;
+                }
+            };
+            const persistDeskPoints = () => {
+                try {
+                    sessionStorage.setItem(deskStorageKey, JSON.stringify(deskState.points.map(({ x, y, label }) => ({ x, y, label }))));
+                } catch (_) { }
+            };
+            const readStoredDeskPanelLayout = () => {
+                try {
+                    const raw = sessionStorage.getItem(deskPanelStorageKey);
+                    if (!raw) {
+                        return null;
+                    }
+                    const parsed = JSON.parse(raw);
+                    return parsed && typeof parsed === 'object' ? parsed : null;
+                } catch (_) {
+                    return null;
+                }
+            };
+            const persistDeskPanelLayout = () => {
+                try {
+                    sessionStorage.setItem(deskPanelStorageKey, JSON.stringify({
+                        left: parseFloat(deskPreviewPanel.style.left),
+                        top: parseFloat(deskPreviewPanel.style.top),
+                        width: parseFloat(deskPreviewPanel.style.width),
+                    }));
+                } catch (_) { }
+            };
+            const getActiveVideoLayout = () => {
+                const video = activeVideo;
+                const bounds = video?.getBoundingClientRect();
+                const cssWidth = Math.max(0, Number(bounds?.width || 0));
+                const cssHeight = Math.max(0, Number(bounds?.height || 0));
+                const sourceWidth = Number(video?.videoWidth || 0);
+                const sourceHeight = Number(video?.videoHeight || 0);
+                if (!video || cssWidth <= 0 || cssHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+                    return {
+                        video,
+                        cssWidth,
+                        cssHeight,
+                        sourceWidth,
+                        sourceHeight,
+                        displayWidth: 0,
+                        displayHeight: 0,
+                        offsetX: 0,
+                        offsetY: 0,
+                    };
+                }
+                const scale = Math.min(cssWidth / sourceWidth, cssHeight / sourceHeight);
+                const displayWidth = sourceWidth * scale;
+                const displayHeight = sourceHeight * scale;
+                return {
+                    video,
+                    cssWidth,
+                    cssHeight,
+                    sourceWidth,
+                    sourceHeight,
+                    displayWidth,
+                    displayHeight,
+                    offsetX: (cssWidth - displayWidth) / 2,
+                    offsetY: (cssHeight - displayHeight) / 2,
+                };
+            };
+            const getDeskStagePoints = (layout = getActiveVideoLayout()) => deskState.points.map((point) => {
+                const displayPoint = sourceToDisplayTexture(point, effectState);
+                return {
+                    x: layout.offsetX + displayPoint.x * layout.displayWidth,
+                    y: layout.offsetY + displayPoint.y * layout.displayHeight,
+                    label: point.label,
+                };
+            });
+            const setDeskPointsFromStage = (stagePoints, layout = getActiveVideoLayout()) => {
+                if (!layout.displayWidth || !layout.displayHeight || !Array.isArray(stagePoints) || stagePoints.length !== 4) {
+                    return;
+                }
+                deskState.points = stagePoints.map((point, index) => ({
+                    ...displayToSourceTexture({
+                        x: clamp01((point.x - layout.offsetX) / layout.displayWidth),
+                        y: clamp01((point.y - layout.offsetY) / layout.displayHeight),
+                    }, effectState),
+                    label: deskState.points[index]?.label || defaultDeskPoints()[index].label,
+                }));
+                persistDeskPoints();
+                syncDeskOverlay();
+            };
+            const setDeskViewEnabled = (enabled) => {
+                deskState.enabled = Boolean(enabled);
+                deskViewEnabled.checked = deskState.enabled;
+                deskOverlay.classList.toggle('is-hidden', !deskState.enabled);
+                deskPreviewPanel.classList.toggle('is-hidden', !deskState.enabled);
+            };
+            const clampDeskPanelPosition = (left, top) => {
+                const maxLeft = Math.max(0, window.innerWidth - deskPreviewPanel.offsetWidth);
+                const maxTop = Math.max(0, window.innerHeight - deskPreviewPanel.offsetHeight);
+                return {
+                    left: Math.min(Math.max(0, left), maxLeft),
+                    top: Math.min(Math.max(0, top), maxTop),
+                };
+            };
+            const clampDeskPanelSize = (width, left) => {
+                const minWidth = 260;
+                const maxWidth = Math.max(minWidth, window.innerWidth - left);
+                return {
+                    width: Math.min(Math.max(minWidth, width), maxWidth),
+                };
+            };
+            const setDeskPanelPosition = (left, top) => {
+                const next = clampDeskPanelPosition(left, top);
+                deskPreviewPanel.style.left = `${next.left}px`;
+                deskPreviewPanel.style.top = `${next.top}px`;
+                deskPreviewPanel.style.right = 'auto';
+                deskPreviewPanel.style.bottom = 'auto';
+                persistDeskPanelLayout();
+            };
+            const setDeskPanelSize = (width) => {
+                const rect = deskPreviewPanel.getBoundingClientRect();
+                const next = clampDeskPanelSize(width, rect.left);
+                deskPreviewPanel.style.width = `${next.width}px`;
+                deskPreviewPanel.style.height = 'auto';
+                persistDeskPanelLayout();
+            };
+            const shouldIgnoreDeskPanelDrag = (target) => {
+                if (!(target instanceof Element)) {
+                    return false;
+                }
+                return Boolean(target.closest('canvas, .desk-preview-resize, .desk-preview-fullscreen'));
+            };
+            const toggleViewerFullscreen = async () => {
+                try {
+                    const fullscreenElement = document.fullscreenElement;
+                    if (fullscreenElement === viewerEl) {
+                        await document.exitFullscreen();
                         return;
                     }
-                    applyQualityOptions(stream, pendingQuality || activeQuality);
-                    applyStream(stream, pendingQuality || activeQuality);
-                    if (pendingModeIndex !== null) {
-                        const matchesPending = Number(stream.width || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.width) || 0)
-                            && Number(stream.height || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.height) || 0);
-                        if (matchesPending) {
-                            pendingModeIndex = null;
-                            document.getElementById('mode-select').disabled = false;
-                        }
+                    if (viewerEl?.requestFullscreen) {
+                        await viewerEl.requestFullscreen();
                     }
-                    loadCapabilities(pendingName || activeName);
-                } catch (err) {
-                    metaEl.textContent = err.message || String(err);
+                } catch (_) { }
+            };
+            const updateDeskPreviewMeta = (layout = getActiveVideoLayout()) => {
+                if (!deskPreviewMeta) {
+                    return;
+                }
+                if (!layout.sourceWidth || !layout.sourceHeight) {
+                    deskPreviewMeta.textContent = 'Waiting for video';
+                    return;
+                }
+                const sourcePoints = deskState.points.map((point) => ({
+                    x: point.x * layout.sourceWidth,
+                    y: point.y * layout.sourceHeight,
+                }));
+                const top = Math.hypot(sourcePoints[1].x - sourcePoints[0].x, sourcePoints[1].y - sourcePoints[0].y);
+                const bottom = Math.hypot(sourcePoints[2].x - sourcePoints[3].x, sourcePoints[2].y - sourcePoints[3].y);
+                const left = Math.hypot(sourcePoints[3].x - sourcePoints[0].x, sourcePoints[3].y - sourcePoints[0].y);
+                const right = Math.hypot(sourcePoints[2].x - sourcePoints[1].x, sourcePoints[2].y - sourcePoints[1].y);
+                const avgWidth = (top + bottom) / 2;
+                const avgHeight = (left + right) / 2;
+                deskPreviewMeta.textContent = `${Math.round(avgWidth)} × ${Math.round(avgHeight)} px • ${formatDeskRatio(avgWidth, avgHeight)}`;
+            };
+            const syncDeskOverlay = () => {
+                if (!deskState.stage || !deskState.layer || !viewerEl) {
+                    return;
+                }
+                const layout = getActiveVideoLayout();
+                const width = Math.max(1, Math.round(layout.cssWidth || viewerEl.clientWidth || 1));
+                const height = Math.max(1, Math.round(layout.cssHeight || viewerEl.clientHeight || 1));
+                deskState.stage.size({ width, height });
+                deskState.dimmer.size({ width, height });
+                const stagePoints = getDeskStagePoints(layout);
+                const flatPoints = stagePoints.flatMap((point) => [point.x, point.y]);
+                deskState.polygon.points(flatPoints);
+                deskState.handles.forEach((handle, index) => {
+                    handle.style.left = `${stagePoints[index].x}px`;
+                    handle.style.top = `${stagePoints[index].y}px`;
+                });
+                updateDeskPreviewMeta(layout);
+                deskState.layer.batchDraw();
+            };
+            const resetDeskView = () => {
+                deskState.points = cloneDeskPoints(defaultDeskPoints());
+                persistDeskPoints();
+                syncDeskOverlay();
+            };
+            const initDeskOverlay = () => {
+                if (!deskOverlay || !window.Konva || deskState.stage) {
+                    return;
+                }
+                deskState.points = readStoredDeskPoints() || cloneDeskPoints(defaultDeskPoints());
+                deskState.stage = new Konva.Stage({
+                    container: deskOverlay,
+                    width: Math.max(1, viewerEl?.clientWidth || 1),
+                    height: Math.max(1, viewerEl?.clientHeight || 1),
+                });
+                deskState.layer = new Konva.Layer();
+                deskState.dimmer = new Konva.Rect({
+                    x: 0,
+                    y: 0,
+                    width: deskState.stage.width(),
+                    height: deskState.stage.height(),
+                    fill: 'rgba(2, 6, 23, 0.12)',
+                    listening: false,
+                });
+                deskState.polygon = new Konva.Line({
+                    closed: true,
+                    points: [],
+                    fill: 'rgba(56, 189, 248, 0.14)',
+                    stroke: '#7dd3fc',
+                    strokeWidth: 2,
+                    shadowColor: 'rgba(34, 211, 238, 0.4)',
+                    shadowBlur: 18,
+                    shadowOpacity: 0.5,
+                    listening: false,
+                });
+                deskState.layer.add(deskState.dimmer);
+                deskState.layer.add(deskState.polygon);
+                deskState.handles = deskState.points.map((point, index) => {
+                    const handle = document.createElement('button');
+                    handle.type = 'button';
+                    handle.className = 'desk-handle';
+                    handle.setAttribute('aria-label', `Desk corner ${point.label || index + 1}`);
+                    const label = document.createElement('span');
+                    label.className = 'desk-handle-label';
+                    label.textContent = point.label || String(index + 1);
+                    handle.appendChild(label);
+                    handle.addEventListener('pointerdown', (event) => {
+                        if (event.button !== 0) {
+                            return;
+                        }
+                        const layout = getActiveVideoLayout();
+                        const stagePoints = getDeskStagePoints(layout);
+                        deskState.handleDragState = {
+                            pointerId: event.pointerId,
+                            index,
+                            offsetX: event.clientX - stagePoints[index].x,
+                            offsetY: event.clientY - stagePoints[index].y,
+                        };
+                        handle.classList.add('is-dragging');
+                        handle.setPointerCapture(event.pointerId);
+                        event.preventDefault();
+                        event.stopPropagation();
+                    });
+                    handle.addEventListener('pointermove', (event) => {
+                        if (!deskState.handleDragState || deskState.handleDragState.pointerId !== event.pointerId || deskState.handleDragState.index !== index) {
+                            return;
+                        }
+                        const layout = getActiveVideoLayout();
+                        const minX = layout.offsetX;
+                        const maxX = layout.offsetX + layout.displayWidth;
+                        const minY = layout.offsetY;
+                        const maxY = layout.offsetY + layout.displayHeight;
+                        const nextPoint = {
+                            x: Math.min(Math.max(event.clientX - deskState.handleDragState.offsetX, minX), maxX),
+                            y: Math.min(Math.max(event.clientY - deskState.handleDragState.offsetY, minY), maxY),
+                        };
+                        const stagePoints = getDeskStagePoints(layout);
+                        stagePoints[index] = nextPoint;
+                        setDeskPointsFromStage(stagePoints, layout);
+                        drawDeskPreview();
+                        event.preventDefault();
+                    });
+                    const stopHandleDrag = (event) => {
+                        if (!deskState.handleDragState || deskState.handleDragState.pointerId !== event.pointerId || deskState.handleDragState.index !== index) {
+                            return;
+                        }
+                        if (handle.hasPointerCapture(event.pointerId)) {
+                            handle.releasePointerCapture(event.pointerId);
+                        }
+                        handle.classList.remove('is-dragging');
+                        deskState.handleDragState = null;
+                    };
+                    handle.addEventListener('pointerup', stopHandleDrag);
+                    handle.addEventListener('pointercancel', stopHandleDrag);
+                    deskOverlay.appendChild(handle);
+                    return handle;
+                });
+                deskState.stage.add(deskState.layer);
+                syncDeskOverlay();
+            };
+            const drawDeskPreview = () => {
+                if (!deskState.enabled || !deskPreviewCanvas || !activePlayer?.canvas) {
+                    return;
+                }
+                const sourceCanvas = activePlayer.canvas;
+                const sourceWidth = Number(sourceCanvas.width || 0);
+                const sourceHeight = Number(sourceCanvas.height || 0);
+                if (sourceWidth <= 0 || sourceHeight <= 0) {
+                    return;
+                }
+                const layout = getActiveVideoLayout();
+                if (layout.displayWidth <= 0 || layout.displayHeight <= 0) {
+                    return;
+                }
+                const stagePoints = getDeskStagePoints(layout);
+                const outputPoints = stagePoints.map((point) => ({
+                    x: clamp01((point.x - layout.offsetX) / layout.displayWidth) * sourceWidth,
+                    y: clamp01((point.y - layout.offsetY) / layout.displayHeight) * sourceHeight,
+                }));
+                const top = Math.hypot(outputPoints[1].x - outputPoints[0].x, outputPoints[1].y - outputPoints[0].y);
+                const bottom = Math.hypot(outputPoints[2].x - outputPoints[3].x, outputPoints[2].y - outputPoints[3].y);
+                const left = Math.hypot(outputPoints[3].x - outputPoints[0].x, outputPoints[3].y - outputPoints[0].y);
+                const right = Math.hypot(outputPoints[2].x - outputPoints[1].x, outputPoints[2].y - outputPoints[1].y);
+                const outputWidth = Math.max(80, (top + bottom) / 2);
+                const outputHeight = Math.max(80, (left + right) / 2);
+                const cssWidth = Math.max(1, Math.round(deskPreviewCanvas.clientWidth || deskPreviewCanvas.parentElement?.clientWidth || 1));
+                const cssHeight = Math.max(1, Math.round(deskPreviewCanvas.clientHeight || deskPreviewCanvas.parentElement?.clientHeight || 1));
+                const dpr = window.devicePixelRatio || 1;
+                const backingWidth = Math.max(1, Math.round(cssWidth * dpr));
+                const backingHeight = Math.max(1, Math.round(cssHeight * dpr));
+                const paddingX = 18;
+                const paddingY = 18;
+                const availableWidth = Math.max(1, cssWidth - paddingX * 2);
+                const availableHeight = Math.max(1, cssHeight - paddingY * 2);
+                const scale = Math.min(availableWidth / outputWidth, availableHeight / outputHeight);
+                const drawWidth = outputWidth * scale;
+                const drawHeight = outputHeight * scale;
+                const drawX = (cssWidth - drawWidth) / 2;
+                const drawY = (cssHeight - drawHeight) / 2;
+                const destPoints = [
+                    { x: drawX, y: drawY },
+                    { x: drawX + drawWidth, y: drawY },
+                    { x: drawX + drawWidth, y: drawY + drawHeight },
+                    { x: drawX, y: drawY + drawHeight },
+                ];
+                if (!deskState.previewRenderer) {
+                    try {
+                        deskState.previewRenderer = new DeskHomographyRenderer(deskPreviewCanvas);
+                    } catch (_) {
+                        deskState.previewRenderer = null;
+                    }
+                }
+                const normalizedSrcQuad = outputPoints.map((point) => ({
+                    x: point.x / sourceWidth,
+                    y: point.y / sourceHeight,
+                }));
+                const drawRect = {
+                    x: drawX,
+                    y: drawY,
+                    width: drawWidth,
+                    height: drawHeight,
+                };
+                const rendered = deskState.previewRenderer?.draw(
+                    sourceCanvas,
+                    normalizedSrcQuad,
+                    {
+                        x: drawRect.x * dpr,
+                        y: drawRect.y * dpr,
+                        width: drawRect.width * dpr,
+                        height: drawRect.height * dpr,
+                    },
+                    backingWidth,
+                    backingHeight,
+                );
+                if (!rendered) {
+                    const ctx = deskPreviewCanvas.getContext('2d');
+                    if (!ctx) {
+                        return;
+                    }
+                    if (deskPreviewCanvas.width !== backingWidth || deskPreviewCanvas.height !== backingHeight) {
+                        deskPreviewCanvas.width = backingWidth;
+                        deskPreviewCanvas.height = backingHeight;
+                    }
+                    ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    ctx.clearRect(0, 0, backingWidth, backingHeight);
+                    ctx.scale(dpr, dpr);
+                    ctx.fillStyle = '#020617';
+                    ctx.fillRect(0, 0, cssWidth, cssHeight);
+                    ctx.save();
+                    ctx.fillStyle = '#08101e';
+                    ctx.fillRect(drawX - 8, drawY - 8, drawWidth + 16, drawHeight + 16);
+                    ctx.restore();
+                    drawImageQuadMesh(ctx, sourceCanvas, outputPoints, drawRect, 16, 16);
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(125, 211, 252, 0.92)';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(drawX, drawY, drawWidth, drawHeight);
+                    ctx.font = `${Math.max(14, drawWidth * 0.06)}px ui-sans-serif, system-ui, sans-serif`;
+                    ctx.fillStyle = 'rgba(248, 251, 255, 0.95)';
+                    ctx.textBaseline = 'bottom';
+                    ctx.fillText(`Desk ${formatDeskRatio(outputWidth, outputHeight)}`, drawX, Math.max(14, drawY - 10));
+                    ctx.restore();
+                    return;
                 }
             };
-            infoWs.onclose = () => {
-                clearTimeout(reconnectTimer);
-                reconnectTimer = setTimeout(connectInfoSocket, reconnectDelay);
-                reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+            const bindInfo = (player) => player.onInfo((info) => {
+                if (info.codec) document.getElementById('codec').textContent = info.codec;
+                if (info.frameNo !== undefined) {
+                    const next = Math.max(displayedFrameNo, Number(info.frameNo || 0));
+                    displayedFrameNo = next;
+                    document.getElementById('frame-no').textContent = next;
+                }
+            });
+            const bindDeskPreview = (player) => player.onFrame(() => {
+                if (player === activePlayer) {
+                    drawDeskPreview();
+                }
+            });
+            const showVideo = (video) => {
+                videoA.classList.toggle('is-hidden', video !== videoA);
+                videoB.classList.toggle('is-hidden', video !== videoB);
+                drawGridOverlay();
+                syncDeskOverlay();
             };
-            infoWs.onerror = () => {
+            let activeVideo = videoA;
+            let standbyVideo = videoB;
+            let displayedFrameNo = 0;
+            let activePlayer = new StreamPlayer(streamWsUrl(activeName, activeQuality));
+            await activePlayer.render(activeVideo);
+            applyEffectStateToPlayer(activePlayer);
+            applyGridStateToPlayer(activePlayer);
+            bindInfo(activePlayer);
+            bindDeskPreview(activePlayer);
+            initDeskOverlay();
+            setDeskViewEnabled(true);
+            let pendingPlayer = null;
+            let pendingSwapTimer = null;
+            let swapToken = 0;
+            let dragState = null;
+            let resizeState = null;
+            let expandedHeaderHeight = null;
+            let effectQueryUpdateTimer = null;
+            const setGridOverlayEnabled = (enabled) => {
+                if (!gridOverlay) {
+                    return;
+                }
+                gridOverlay.style.display = enabled ? 'block' : 'none';
+            };
+            const drawGridOverlay = () => {
+                if (!gridOverlay) {
+                    return;
+                }
+                const layout = getActiveVideoLayout();
+                const cssWidth = Math.max(0, Math.round(layout.cssWidth || 0));
+                const cssHeight = Math.max(0, Math.round(layout.cssHeight || 0));
+                const dpr = window.devicePixelRatio || 1;
+                const width = Math.max(1, Math.round(cssWidth * dpr));
+                const height = Math.max(1, Math.round(cssHeight * dpr));
+                if (gridOverlay.width !== width || gridOverlay.height !== height) {
+                    gridOverlay.width = width;
+                    gridOverlay.height = height;
+                }
+                const ctx = gridOverlay.getContext('2d');
+                if (!ctx) {
+                    return;
+                }
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.clearRect(0, 0, gridOverlay.width, gridOverlay.height);
+                if (!fisheyeGridEnabled.checked || !layout.video || cssWidth <= 0 || cssHeight <= 0) {
+                    return;
+                }
+                if (layout.sourceWidth <= 0 || layout.sourceHeight <= 0) {
+                    return;
+                }
+                ctx.scale(dpr, dpr);
+                ctx.translate(layout.offsetX, layout.offsetY);
+                drawGuideGrid(ctx, layout.displayWidth, layout.displayHeight, effectState, true);
+            };
+            const readStoredHeaderLayout = () => {
+                try {
+                    const raw = sessionStorage.getItem(headerStorageKey);
+                    if (!raw) {
+                        return null;
+                    }
+                    const parsed = JSON.parse(raw);
+                    return parsed && typeof parsed === 'object' ? parsed : null;
+                } catch (_) {
+                    return null;
+                }
+            };
+            const persistHeaderLayout = () => {
+                const left = parseFloat(headerEl.style.left);
+                const top = parseFloat(headerEl.style.top);
+                const width = parseFloat(headerEl.style.width);
+                const height = parseFloat(headerEl.style.height);
+                try {
+                    sessionStorage.setItem(headerStorageKey, JSON.stringify({
+                        left: Number.isFinite(left) ? left : null,
+                        top: Number.isFinite(top) ? top : null,
+                        width: Number.isFinite(width) ? width : null,
+                        height: Number.isFinite(height) ? height : null,
+                    }));
+                } catch (_) { }
+            };
+            const updateHeaderState = (collapsed) => {
+                if (collapsed) {
+                    const currentHeight = parseFloat(headerEl.style.height);
+                    if (Number.isFinite(currentHeight) && currentHeight > 0) {
+                        expandedHeaderHeight = currentHeight;
+                    }
+                    headerEl.style.height = '';
+                } else if (expandedHeaderHeight) {
+                    headerEl.style.height = `${expandedHeaderHeight}px`;
+                }
+                headerEl.classList.toggle('is-collapsed', collapsed);
+                headerToggle.setAttribute('aria-expanded', String(!collapsed));
+                headerToggle.title = collapsed ? 'Expand stream controls' : 'Collapse stream controls';
+                headerToggle.querySelector('.header-toggle-icon').textContent = collapsed ? '+' : '−';
+            };
+            const clampHeaderPosition = (left, top) => {
+                const maxLeft = Math.max(0, window.innerWidth - headerEl.offsetWidth);
+                const maxTop = Math.max(0, window.innerHeight - headerEl.offsetHeight);
+                return {
+                    left: Math.min(Math.max(0, left), maxLeft),
+                    top: Math.min(Math.max(0, top), maxTop),
+                };
+            };
+            const clampHeaderSize = (width, height, left, top) => {
+                const minWidth = 280;
+                const minHeight = 100;
+                const maxWidth = Math.max(minWidth, window.innerWidth - left);
+                const maxHeight = Math.max(minHeight, window.innerHeight - top);
+                return {
+                    width: Math.min(Math.max(minWidth, width), maxWidth),
+                    height: Math.min(Math.max(minHeight, height), maxHeight),
+                };
+            };
+            const setHeaderPosition = (left, top) => {
+                const next = clampHeaderPosition(left, top);
+                headerEl.style.left = `${next.left}px`;
+                headerEl.style.top = `${next.top}px`;
+                persistHeaderLayout();
+            };
+            const setHeaderSize = (width, height) => {
+                const rect = headerEl.getBoundingClientRect();
+                const next = clampHeaderSize(width, height, rect.left, rect.top);
+                headerEl.style.width = `${next.width}px`;
+                headerEl.style.height = `${next.height}px`;
+                if (!headerEl.classList.contains('is-collapsed')) {
+                    expandedHeaderHeight = next.height;
+                }
+                persistHeaderLayout();
+            };
+            const shouldIgnorePanelDrag = (target) => {
+                if (!(target instanceof Element)) {
+                    return false;
+                }
+                return Boolean(target.closest('button, input, select, label, a, video, .resize-handle'));
+            };
+            updateHeaderState(true);
+            const storedHeaderLayout = readStoredHeaderLayout();
+            if (storedHeaderLayout) {
+                if (Number.isFinite(storedHeaderLayout.width) && Number.isFinite(storedHeaderLayout.height)) {
+                    const initialSize = clampHeaderSize(
+                        storedHeaderLayout.width,
+                        storedHeaderLayout.height,
+                        Number.isFinite(storedHeaderLayout.left) ? storedHeaderLayout.left : headerEl.getBoundingClientRect().left,
+                        Number.isFinite(storedHeaderLayout.top) ? storedHeaderLayout.top : headerEl.getBoundingClientRect().top,
+                    );
+                    headerEl.style.width = `${initialSize.width}px`;
+                    expandedHeaderHeight = initialSize.height;
+                }
+                if (Number.isFinite(storedHeaderLayout.left) && Number.isFinite(storedHeaderLayout.top)) {
+                    setHeaderPosition(storedHeaderLayout.left, storedHeaderLayout.top);
+                } else {
+                    persistHeaderLayout();
+                }
+            }
+            const storedDeskPanelLayout = readStoredDeskPanelLayout();
+            if (storedDeskPanelLayout) {
+                if (Number.isFinite(storedDeskPanelLayout.width)) {
+                    const initialDeskSize = clampDeskPanelSize(
+                        storedDeskPanelLayout.width,
+                        Number.isFinite(storedDeskPanelLayout.left) ? storedDeskPanelLayout.left : deskPreviewPanel.getBoundingClientRect().left,
+                    );
+                    deskPreviewPanel.style.width = `${initialDeskSize.width}px`;
+                    deskPreviewPanel.style.height = 'auto';
+                }
+                if (Number.isFinite(storedDeskPanelLayout.left) && Number.isFinite(storedDeskPanelLayout.top)) {
+                    setDeskPanelPosition(storedDeskPanelLayout.left, storedDeskPanelLayout.top);
+                } else {
+                    persistDeskPanelLayout();
+                }
+            }
+            headerToggle.addEventListener('click', () => {
+                if (dragState && dragState.moved) {
+                    return;
+                }
+                updateHeaderState(!headerEl.classList.contains('is-collapsed'));
+            });
+            headerEl.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) {
+                    return;
+                }
+                if (resizeState || shouldIgnorePanelDrag(event.target)) {
+                    return;
+                }
+                const rect = headerEl.getBoundingClientRect();
+                dragState = {
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originLeft: rect.left,
+                    originTop: rect.top,
+                    moved: false,
+                };
+                headerEl.classList.add('is-dragging');
+                headerEl.setPointerCapture(event.pointerId);
+            });
+            headerEl.addEventListener('pointermove', (event) => {
+                if (!dragState || dragState.pointerId !== event.pointerId) {
+                    return;
+                }
+                const dx = event.clientX - dragState.startX;
+                const dy = event.clientY - dragState.startY;
+                if (!dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                    dragState.moved = true;
+                }
+                if (!dragState.moved) {
+                    return;
+                }
+                event.preventDefault();
+                setHeaderPosition(dragState.originLeft + dx, dragState.originTop + dy);
+            });
+            const stopDragging = (event) => {
+                if (!dragState || dragState.pointerId !== event.pointerId) {
+                    return;
+                }
+                headerEl.classList.remove('is-dragging');
+                if (headerEl.hasPointerCapture(event.pointerId)) {
+                    headerEl.releasePointerCapture(event.pointerId);
+                }
+                const moved = dragState.moved;
+                dragState = null;
+                if (moved) {
+                    event.preventDefault();
+                }
+            };
+            headerEl.addEventListener('pointerup', stopDragging);
+            headerEl.addEventListener('pointercancel', stopDragging);
+            headerResizeHandle.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) {
+                    return;
+                }
+                if (headerEl.classList.contains('is-collapsed')) {
+                    return;
+                }
+                const rect = headerEl.getBoundingClientRect();
+                resizeState = {
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originWidth: rect.width,
+                    originHeight: rect.height,
+                    originLeft: rect.left,
+                    originTop: rect.top,
+                };
+                event.preventDefault();
+                event.stopPropagation();
+                headerResizeHandle.setPointerCapture(event.pointerId);
+            });
+            headerResizeHandle.addEventListener('pointermove', (event) => {
+                if (!resizeState || resizeState.pointerId !== event.pointerId) {
+                    return;
+                }
+                const width = resizeState.originWidth + (event.clientX - resizeState.startX);
+                const height = resizeState.originHeight + (event.clientY - resizeState.startY);
+                setHeaderSize(width, height);
+            });
+            const stopResizing = (event) => {
+                if (!resizeState || resizeState.pointerId !== event.pointerId) {
+                    return;
+                }
+                if (headerResizeHandle.hasPointerCapture(event.pointerId)) {
+                    headerResizeHandle.releasePointerCapture(event.pointerId);
+                }
+                resizeState = null;
+            };
+            headerResizeHandle.addEventListener('pointerup', stopResizing);
+            headerResizeHandle.addEventListener('pointercancel', stopResizing);
+            deskPreviewPanel.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) {
+                    return;
+                }
+                if (deskState.resizeState || shouldIgnoreDeskPanelDrag(event.target)) {
+                    return;
+                }
+                const rect = deskPreviewPanel.getBoundingClientRect();
+                deskState.dragState = {
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originLeft: rect.left,
+                    originTop: rect.top,
+                    moved: false,
+                };
+                deskPreviewPanel.classList.add('is-dragging');
+                deskPreviewPanel.setPointerCapture(event.pointerId);
+            });
+            deskPreviewPanel.addEventListener('pointermove', (event) => {
+                if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
+                    return;
+                }
+                const dx = event.clientX - deskState.dragState.startX;
+                const dy = event.clientY - deskState.dragState.startY;
+                if (!deskState.dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                    deskState.dragState.moved = true;
+                }
+                if (!deskState.dragState.moved) {
+                    return;
+                }
+                event.preventDefault();
+                setDeskPanelPosition(deskState.dragState.originLeft + dx, deskState.dragState.originTop + dy);
+                drawDeskPreview();
+            });
+            const stopDeskPanelDragging = (event) => {
+                if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
+                    return;
+                }
+                deskPreviewPanel.classList.remove('is-dragging');
+                if (deskPreviewPanel.hasPointerCapture(event.pointerId)) {
+                    deskPreviewPanel.releasePointerCapture(event.pointerId);
+                }
+                deskState.dragState = null;
+            };
+            deskPreviewPanel.addEventListener('pointerup', stopDeskPanelDragging);
+            deskPreviewPanel.addEventListener('pointercancel', stopDeskPanelDragging);
+            deskPreviewResize.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) {
+                    return;
+                }
+                const rect = deskPreviewPanel.getBoundingClientRect();
+                deskState.resizeState = {
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originWidth: rect.width,
+                    originLeft: rect.left,
+                    originTop: rect.top,
+                };
+                event.preventDefault();
+                event.stopPropagation();
+                deskPreviewResize.setPointerCapture(event.pointerId);
+            });
+            deskPreviewResize.addEventListener('pointermove', (event) => {
+                if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
+                    return;
+                }
+                const width = deskState.resizeState.originWidth + (event.clientX - deskState.resizeState.startX);
+                setDeskPanelSize(width);
+                drawDeskPreview();
+            });
+            const stopDeskPanelResizing = (event) => {
+                if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
+                    return;
+                }
+                if (deskPreviewResize.hasPointerCapture(event.pointerId)) {
+                    deskPreviewResize.releasePointerCapture(event.pointerId);
+                }
+                deskState.resizeState = null;
+            };
+            deskPreviewResize.addEventListener('pointerup', stopDeskPanelResizing);
+            deskPreviewResize.addEventListener('pointercancel', stopDeskPanelResizing);
+            window.addEventListener('resize', () => {
+                const rect = headerEl.getBoundingClientRect();
+                const size = clampHeaderSize(rect.width, rect.height, rect.left, rect.top);
+                headerEl.style.width = `${size.width}px`;
+                headerEl.style.height = `${size.height}px`;
+                setHeaderPosition(rect.left, rect.top);
+                const deskRect = deskPreviewPanel.getBoundingClientRect();
+                const deskSize = clampDeskPanelSize(deskRect.width, deskRect.left);
+                deskPreviewPanel.style.width = `${deskSize.width}px`;
+                deskPreviewPanel.style.height = 'auto';
+                setDeskPanelPosition(deskRect.left, deskRect.top);
+                drawGridOverlay();
+                syncDeskOverlay();
+                drawDeskPreview();
+            });
+            const setUrlState = (name, quality) => {
+                const url = new URL(location.href);
+                const parts = url.pathname.split('/');
+                parts[parts.length - 1] = encodeURIComponent(name);
+                url.pathname = parts.join('/');
+                if (quality) {
+                    url.searchParams.set('quality', quality);
+                } else {
+                    url.searchParams.delete('quality');
+                }
+                if (effectState.enabled) {
+                    url.searchParams.set('distort', '1');
+                } else {
+                    url.searchParams.delete('distort');
+                }
+                url.searchParams.set('fx', effectState.fx.toFixed(2));
+                url.searchParams.set('fy', effectState.fy.toFixed(2));
+                url.searchParams.set('scale', effectState.scale.toFixed(2));
+                history.replaceState(null, '', url);
+            };
+            const swapStream = async (nextName, nextQuality) => {
+                swapToken++;
+                const token = swapToken;
+                const nextVideo = standbyVideo;
+                const nextPlayer = new StreamPlayer(streamWsUrl(nextName, nextQuality));
+                if (nextName === activeName) {
+                    nextPlayer.setFrameBase(displayedFrameNo);
+                } else {
+                    nextPlayer.setFrameBase(0);
+                }
+                await nextPlayer.render(nextVideo);
+                applyEffectStateToPlayer(nextPlayer);
+                applyGridStateToPlayer(nextPlayer);
+                bindInfo(nextPlayer);
+                bindDeskPreview(nextPlayer);
+                nextPlayer.onReady(() => {
+                    if (token !== swapToken) {
+                        nextPlayer.close();
+                        return;
+                    }
+                    const oldPlayer = activePlayer;
+                    const nameChanged = nextName !== activeName;
+                    activeName = nextName;
+                    activeQuality = nextQuality;
+                    pendingName = '';
+                    pendingQuality = '';
+                    activePlayer = nextPlayer;
+                    pendingPlayer = null;
+                    clearTimeout(pendingSwapTimer);
+                    pendingSwapTimer = null;
+                    showVideo(nextVideo);
+                    standbyVideo = activeVideo;
+                    activeVideo = nextVideo;
+                    drawGridOverlay();
+                    syncDeskOverlay();
+                    drawDeskPreview();
+                    if (nameChanged) {
+                        displayedFrameNo = 0;
+                        document.getElementById('frame-no').textContent = '0';
+                    }
+                    streamSelect.disabled = false;
+                    streamSelect.value = activeName;
+                    qualitySelect.disabled = false;
+                    qualitySelect.value = activeQuality;
+                    setUrlState(activeName, activeQuality);
+                    loadCapabilities(activeName);
+                    setTimeout(() => oldPlayer.close(), 120);
+                });
+                if (pendingPlayer) {
+                    pendingPlayer.close();
+                }
+                pendingPlayer = nextPlayer;
+                streamSelect.disabled = true;
+                qualitySelect.disabled = true;
+                clearTimeout(pendingSwapTimer);
+                pendingSwapTimer = setTimeout(() => {
+                    if (token !== swapToken) {
+                        return;
+                    }
+                    if (pendingPlayer) {
+                        pendingPlayer.close();
+                        pendingPlayer = null;
+                    }
+                    pendingName = '';
+                    pendingQuality = '';
+                    streamSelect.disabled = false;
+                    streamSelect.value = activeName;
+                    qualitySelect.disabled = false;
+                    qualitySelect.value = activeQuality;
+                    loadCapabilities(activeName);
+                }, 10000);
+            };
+            window.addEventListener('beforeunload', () => {
+                clearTimeout(effectQueryUpdateTimer);
+                activePlayer.close();
+                if (pendingPlayer) pendingPlayer.close();
+                clearTimeout(pendingSwapTimer);
+            }, { once: true });
+            const applySelectedQuality = async () => {
+                const nextQuality = qualitySelect.value;
+                if (nextQuality === activeQuality) {
+                    return;
+                }
+                pendingQuality = nextQuality;
+                await swapStream(activeName, nextQuality);
+            };
+            const applySelectedStream = async () => {
+                const nextName = streamSelect.value;
+                if (!nextName || nextName === activeName) {
+                    return;
+                }
+                const nextStream = findStream(lastStatusMessage, nextName);
+                let nextQuality = '';
+                if (nextStream && activeQuality && (nextStream.renditions || []).some((item) => item.name === activeQuality)) {
+                    nextQuality = activeQuality;
+                }
+                pendingName = nextName;
+                pendingQuality = nextQuality;
+                await swapStream(nextName, nextQuality);
+            };
+            const applySelectedMode = async () => {
+                const streamName = pendingName || activeName;
+                const capsResponse = capabilityCache.get(streamName);
+                const modes = capsResponse?.capabilities?.modes || [];
+                const selectedIndex = Number(document.getElementById('mode-select').value);
+                const selectedMode = modes[selectedIndex];
+                if (!selectedMode) {
+                    return;
+                }
+                try {
+                    pendingModeIndex = selectedIndex;
+                    document.getElementById('mode-select').disabled = true;
+                    const fps = Array.isArray(selectedMode.fps) && selectedMode.fps.length > 0 ? Number(selectedMode.fps[selectedMode.fps.length - 1]) : null;
+                    const response = await fetch(`/api/streams/${encodeURIComponent(streamName)}/mode`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            width: Number(selectedMode.width || 0),
+                            height: Number(selectedMode.height || 0),
+                            frameRate: fps || null,
+                        }),
+                    });
+                    if (!response.ok) {
+                        throw new Error(await response.text() || `HTTP ${response.status}`);
+                    }
+                    capabilityCache.delete(streamName);
+                    pendingName = streamName;
+                    pendingQuality = activeQuality;
+                    await swapStream(streamName, activeQuality);
+                } catch (error) {
+                    metaEl.textContent = error.message || String(error);
+                    pendingModeIndex = null;
+                    document.getElementById('mode-select').disabled = false;
+                }
+            };
+            streamSelect.addEventListener('change', applySelectedStream);
+            streamSelect.addEventListener('input', applySelectedStream);
+            qualitySelect.addEventListener('change', applySelectedQuality);
+            qualitySelect.addEventListener('input', applySelectedQuality);
+            document.getElementById('mode-select').addEventListener('change', applySelectedMode);
+            fisheyeEnabled.addEventListener('change', () => {
+                setEffectEnabled(fisheyeEnabled.checked);
+                syncEffectState();
+            });
+            fisheyeEnabledCollapsed.addEventListener('change', () => {
+                setEffectEnabled(fisheyeEnabledCollapsed.checked);
+                syncEffectState();
+            });
+            deskViewEnabled.addEventListener('change', () => {
+                setDeskViewEnabled(deskViewEnabled.checked);
+                syncDeskOverlay();
+                drawDeskPreview();
+            });
+            deskPreviewFullscreen.addEventListener('click', () => {
+                toggleViewerFullscreen();
+            });
+            deskViewReset.addEventListener('click', () => {
+                resetDeskView();
+                drawDeskPreview();
+            });
+            fisheyeGridEnabled.addEventListener('change', () => {
+                setGridOverlayEnabled(fisheyeGridEnabled.checked);
+                drawGridOverlay();
+            });
+            fisheyeFx.addEventListener('input', syncEffectState);
+            fisheyeFy.addEventListener('input', syncEffectState);
+            fisheyeScale.addEventListener('input', syncEffectState);
+            fisheyeFxInput.addEventListener('change', () => syncEffectFromInput(fisheyeFxInput, fisheyeFx, -0.25, 0.25, effectDefaults.fx));
+            fisheyeFyInput.addEventListener('change', () => syncEffectFromInput(fisheyeFyInput, fisheyeFy, -0.25, 0.25, effectDefaults.fy));
+            fisheyeScaleInput.addEventListener('change', () => syncEffectFromInput(fisheyeScaleInput, fisheyeScale, 0.5, 3, effectDefaults.scale));
+            fisheyeFxInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    syncEffectFromInput(fisheyeFxInput, fisheyeFx, -0.25, 0.25, effectDefaults.fx);
+                }
+            });
+            fisheyeFyInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    syncEffectFromInput(fisheyeFyInput, fisheyeFy, -0.25, 0.25, effectDefaults.fy);
+                }
+            });
+            fisheyeScaleInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    syncEffectFromInput(fisheyeScaleInput, fisheyeScale, 0.5, 3, effectDefaults.scale);
+                }
+            });
+            document.getElementById('fisheye-fx-reset').addEventListener('click', () => resetEffectControl('fx'));
+            document.getElementById('fisheye-fy-reset').addEventListener('click', () => resetEffectControl('fy'));
+            document.getElementById('fisheye-scale-reset').addEventListener('click', () => resetEffectControl('scale'));
+            const handleVideoLayoutChange = () => {
+                drawGridOverlay();
+                syncDeskOverlay();
+                drawDeskPreview();
+            };
+            videoA.addEventListener('loadedmetadata', handleVideoLayoutChange);
+            videoB.addEventListener('loadedmetadata', handleVideoLayoutChange);
+            setGridOverlayEnabled(false);
+            const initialDistortEnabled = initialParams.get('distort') === '1' || initialParams.get('distort') === 'true';
+            setEffectEnabled(initialDistortEnabled);
+            setDeskViewEnabled(true);
+            fisheyeFx.value = String(clampEffectValue(initialParams.get('fx'), -0.25, 0.25, effectDefaults.fx));
+            fisheyeFy.value = String(clampEffectValue(initialParams.get('fy'), -0.25, 0.25, effectDefaults.fy));
+            fisheyeScale.value = String(clampEffectValue(initialParams.get('scale'), 0.5, 3, effectDefaults.scale));
+            syncEffectState();
+            syncDeskOverlay();
+            drawDeskPreview();
+            document.addEventListener('fullscreenchange', () => {
+                const isFullscreen = document.fullscreenElement === viewerEl;
+                deskPreviewFullscreen.textContent = isFullscreen ? 'Exit Fullscreen' : 'Fullscreen';
+                syncDeskOverlay();
+                drawDeskPreview();
+            });
+
+            let infoWs = null;
+            let reconnectTimer = null;
+            let reconnectDelay = 1000;
+            const connectInfoSocket = () => {
+                infoWs = new WebSocket(`${protocol}://${location.host}/ws/info`);
+                infoWs.onopen = () => {
+                    reconnectDelay = 1000;
+                };
+                infoWs.onmessage = (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        lastStatusMessage = message;
+                        applyStreamOptions(message, pendingName || activeName);
+                        const stream = findStream(message, pendingName || activeName);
+                        if (!stream) {
+                            titleEl.textContent = 'Stream not found';
+                            metaEl.textContent = 'This stream is not currently available';
+                            return;
+                        }
+                        applyQualityOptions(stream, pendingQuality || activeQuality);
+                        applyStream(stream, pendingQuality || activeQuality);
+                        if (pendingModeIndex !== null) {
+                            const matchesPending = Number(stream.width || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.width) || 0)
+                                && Number(stream.height || 0) === Number((capabilityCache.get(pendingName || activeName)?.capabilities?.modes?.[pendingModeIndex]?.height) || 0);
+                            if (matchesPending) {
+                                pendingModeIndex = null;
+                                document.getElementById('mode-select').disabled = false;
+                            }
+                        }
+                        loadCapabilities(pendingName || activeName);
+                    } catch (err) {
+                        metaEl.textContent = err.message || String(err);
+                    }
+                };
+                infoWs.onclose = () => {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = setTimeout(connectInfoSocket, reconnectDelay);
+                    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+                };
+                infoWs.onerror = () => {
+                    if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
+                        infoWs.close();
+                    }
+                };
+            };
+            connectInfoSocket();
+            window.addEventListener('beforeunload', () => {
+                clearTimeout(pendingSwapTimer);
+                clearTimeout(effectQueryUpdateTimer);
+                clearTimeout(reconnectTimer);
+                if (deskState.stage) {
+                    deskState.stage.destroy();
+                    deskState.stage = null;
+                }
                 if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
                     infoWs.close();
                 }
-            };
-        };
-        connectInfoSocket();
-        window.addEventListener('beforeunload', () => {
-            clearTimeout(pendingSwapTimer);
-            clearTimeout(reconnectTimer);
-            if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
-                infoWs.close();
-            }
-        }, {once: true});
-    }
+            }, { once: true });
+        }
 
-    main().catch((err) => {
-        document.getElementById('stream-title').textContent = 'Failed to load stream';
-        document.getElementById('stream-meta').textContent = err.message || String(err);
-    });
-</script>
+        main().catch((err) => {
+            document.getElementById('stream-title').textContent = 'Failed to load stream';
+            document.getElementById('stream-meta').textContent = err.message || String(err);
+        });
+    </script>
 </body>
+
 </html>
