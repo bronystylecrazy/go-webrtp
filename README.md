@@ -86,6 +86,10 @@ For file sources:
 - file sources are transcoded to H264 with `ffmpeg`, so `ffmpeg` and `ffprobe` must be available on `PATH`
 - `width`, `height`, `frameRate`, and `bitrateKbps` are optional output controls for the mock stream
 - `onDemand` is optional; when `true`, playback starts on first viewer and stops a few seconds after the last viewer disconnects
+- `keyframeSink` is optional and currently supports `fs`
+- `keyframeOutput` is optional; when set, each IDR frame is decoded server-side and written to that directory
+- `keyframeFormat` is optional and supports `jpg` or `png` (default: `jpg`)
+- keyframe undistortion and desk crop are synced live from the frontend calibration endpoint, not from static config
 
 For USB sources:
 

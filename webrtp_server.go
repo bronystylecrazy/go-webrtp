@@ -109,5 +109,8 @@ func (r *Instance) Stop() error {
 	if recorder := r.currentRecorder(); recorder != nil {
 		_ = recorder.Stop()
 	}
+	if r.keyframes != nil {
+		r.keyframes.Close()
+	}
 	return nil
 }

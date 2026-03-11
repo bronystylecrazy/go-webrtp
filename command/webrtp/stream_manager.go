@@ -34,19 +34,26 @@ type StreamGroup struct {
 }
 
 type StreamApiRequest struct {
-	Name        *string      `json:"name"`
-	SourceType  *string      `json:"sourceType"`
-	RtspUrl     string       `json:"rtspUrl"`
-	Device      string       `json:"device"`
-	Path        string       `json:"path"`
-	Codec       string       `json:"codec"`
-	Width       *int         `json:"width"`
-	Height      *int         `json:"height"`
-	FrameRate   *float64     `json:"frameRate"`
-	BitrateKbps *int         `json:"bitrateKbps"`
-	Enabled     *bool        `json:"enabled"`
-	OnDemand    bool         `json:"onDemand"`
-	Renditions  []*Rendition `json:"renditions"`
+	Name              *string      `json:"name"`
+	SourceType        *string      `json:"sourceType"`
+	RtspUrl           string       `json:"rtspUrl"`
+	Device            string       `json:"device"`
+	Path              string       `json:"path"`
+	Codec             string       `json:"codec"`
+	Width             *int         `json:"width"`
+	Height            *int         `json:"height"`
+	FrameRate         *float64     `json:"frameRate"`
+	BitrateKbps       *int         `json:"bitrateKbps"`
+	ServeStream       *bool        `json:"serveStream,omitempty"`
+	CalibrationFrom   string       `json:"calibrationFrom,omitempty"`
+	KeyframeSink      string       `json:"keyframeSink,omitempty"`
+	KeyframeOutput    string       `json:"keyframeOutput,omitempty"`
+	KeyframeFormat    string       `json:"keyframeFormat,omitempty"`
+	KeyframeMqttURL   string       `json:"keyframeMqttUrl,omitempty"`
+	KeyframeMqttTopic string       `json:"keyframeMqttTopic,omitempty"`
+	Enabled           *bool        `json:"enabled"`
+	OnDemand          bool         `json:"onDemand"`
+	Renditions        []*Rendition `json:"renditions"`
 }
 
 type RenditionApiResponse struct {
@@ -58,24 +65,31 @@ type RenditionApiResponse struct {
 }
 
 type StreamApiResponse struct {
-	Index           int                     `json:"index"`
-	Name            string                  `json:"name"`
-	SourceType      string                  `json:"sourceType"`
-	RtspUrl         string                  `json:"rtspUrl,omitempty"`
-	Device          string                  `json:"device,omitempty"`
-	Path            string                  `json:"path,omitempty"`
-	Codec           string                  `json:"codec,omitempty"`
-	Width           *int                    `json:"width,omitempty"`
-	Height          *int                    `json:"height,omitempty"`
-	FrameRate       *float64                `json:"frameRate,omitempty"`
-	BitrateKbps     *int                    `json:"bitrateKbps,omitempty"`
-	Enabled         bool                    `json:"enabled"`
-	OnDemand        bool                    `json:"onDemand,omitempty"`
-	Url             string                  `json:"url"`
-	WsPath          string                  `json:"wsPath"`
-	Stats           *webrtp.StreamStats     `json:"stats"`
-	Renditions      []*RenditionApiResponse `json:"renditions,omitempty"`
-	ActiveRendition string                  `json:"activeRendition,omitempty"`
+	Index             int                     `json:"index"`
+	Name              string                  `json:"name"`
+	SourceType        string                  `json:"sourceType"`
+	RtspUrl           string                  `json:"rtspUrl,omitempty"`
+	Device            string                  `json:"device,omitempty"`
+	Path              string                  `json:"path,omitempty"`
+	Codec             string                  `json:"codec,omitempty"`
+	Width             *int                    `json:"width,omitempty"`
+	Height            *int                    `json:"height,omitempty"`
+	FrameRate         *float64                `json:"frameRate,omitempty"`
+	BitrateKbps       *int                    `json:"bitrateKbps,omitempty"`
+	ServeStream       bool                    `json:"serveStream"`
+	CalibrationFrom   string                  `json:"calibrationFrom,omitempty"`
+	KeyframeSink      string                  `json:"keyframeSink,omitempty"`
+	KeyframeOutput    string                  `json:"keyframeOutput,omitempty"`
+	KeyframeFormat    string                  `json:"keyframeFormat,omitempty"`
+	KeyframeMqttURL   string                  `json:"keyframeMqttUrl,omitempty"`
+	KeyframeMqttTopic string                  `json:"keyframeMqttTopic,omitempty"`
+	Enabled           bool                    `json:"enabled"`
+	OnDemand          bool                    `json:"onDemand,omitempty"`
+	Url               string                  `json:"url"`
+	WsPath            string                  `json:"wsPath"`
+	Stats             *webrtp.StreamStats     `json:"stats"`
+	Renditions        []*RenditionApiResponse `json:"renditions,omitempty"`
+	ActiveRendition   string                  `json:"activeRendition,omitempty"`
 }
 
 type StreamCapabilitiesResponse struct {
@@ -97,6 +111,9 @@ func StreamManagerNew(configPath string, cfg *Config) (*StreamManager, error) {
 		if upstream.Enabled == nil {
 			upstream.Enabled = boolPtr(true)
 		}
+		if upstream.ServeStream == nil {
+			upstream.ServeStream = boolPtr(true)
+		}
 		group, err := r.streamGroupCreate(len(r.groups), upstream)
 		if err != nil {
 			r.streamsStop()
@@ -116,7 +133,7 @@ func (r *StreamManager) StreamList() []*Stream {
 	defer r.mu.RUnlock()
 	streams := make([]*Stream, 0, len(r.groups))
 	for _, group := range r.groups {
-		if !StreamUpstreamEnabled(group.Upstream) || group.Default == nil {
+		if !StreamUpstreamEnabled(group.Upstream) || !StreamUpstreamServeStream(group.Upstream) || group.Default == nil {
 			continue
 		}
 		streams = append(streams, group.Default)
@@ -129,7 +146,7 @@ func (r *StreamManager) StreamListExpanded() []*Stream {
 	defer r.mu.RUnlock()
 	streams := make([]*Stream, 0, len(r.streamsByName))
 	for _, group := range r.groups {
-		if !StreamUpstreamEnabled(group.Upstream) || len(group.Streams) == 0 {
+		if !StreamUpstreamEnabled(group.Upstream) || !StreamUpstreamServeStream(group.Upstream) || len(group.Streams) == 0 {
 			continue
 		}
 		if len(group.Streams) == 1 {
@@ -146,7 +163,7 @@ func (r *StreamManager) StreamListExpandedActive() []*Stream {
 	defer r.mu.RUnlock()
 	streams := make([]*Stream, 0, len(r.streamsByName))
 	for _, group := range r.groups {
-		if !StreamUpstreamEnabled(group.Upstream) || len(group.Streams) == 0 {
+		if !StreamUpstreamEnabled(group.Upstream) || !StreamUpstreamServeStream(group.Upstream) || len(group.Streams) == 0 {
 			continue
 		}
 		if len(group.Streams) == 1 {
@@ -155,7 +172,7 @@ func (r *StreamManager) StreamListExpandedActive() []*Stream {
 		}
 		active := make([]*Stream, 0, len(group.Streams))
 		for _, stream := range group.Streams {
-			if stream.Hub.GetStats(stream.Name).ClientCount > 0 {
+			if stream.activeClientCount() > 0 {
 				active = append(active, stream)
 			}
 		}
@@ -171,7 +188,20 @@ func (r *StreamManager) StreamListExpandedActive() []*Stream {
 func (r *StreamManager) StreamByName(name string) (*Stream, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.streamByNameLocked(name, true)
+}
+
+func (r *StreamManager) StreamByNameAny(name string) (*Stream, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.streamByNameLocked(name, false)
+}
+
+func (r *StreamManager) streamByNameLocked(name string, requireServed bool) (*Stream, bool) {
 	if stream, ok := r.streamsByName[name]; ok {
+		if requireServed && !StreamUpstreamServeStream(r.groupsByName[stream.GroupName].Upstream) {
+			return nil, false
+		}
 		return stream, true
 	}
 	group, ok := r.groupsByName[name]
@@ -181,20 +211,42 @@ func (r *StreamManager) StreamByName(name string) (*Stream, bool) {
 	if !StreamUpstreamEnabled(group.Upstream) || group.Default == nil {
 		return nil, false
 	}
+	if requireServed && !StreamUpstreamServeStream(group.Upstream) {
+		return nil, false
+	}
 	return group.Default, true
 }
 
 func (r *StreamManager) StreamByNameQuality(name, quality string) (*Stream, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.streamByNameQualityLocked(name, quality, true)
+}
+
+func (r *StreamManager) StreamByNameQualityAny(name, quality string) (*Stream, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.streamByNameQualityLocked(name, quality, false)
+}
+
+func (r *StreamManager) streamByNameQualityLocked(name, quality string, requireServed bool) (*Stream, bool) {
 	group, ok := r.groupsByName[name]
 	if !ok {
 		if stream, ok := r.streamsByName[name]; ok {
+			if requireServed {
+				group, groupOK := r.groupsByName[stream.GroupName]
+				if !groupOK || !StreamUpstreamServeStream(group.Upstream) {
+					return nil, false
+				}
+			}
 			return stream, true
 		}
 		return nil, false
 	}
 	if !StreamUpstreamEnabled(group.Upstream) || group.Default == nil {
+		return nil, false
+	}
+	if requireServed && !StreamUpstreamServeStream(group.Upstream) {
 		return nil, false
 	}
 	if quality == "" {
@@ -214,7 +266,7 @@ func (r *StreamManager) StreamByIndex(index int) (*Stream, bool) {
 	if index < 0 || index >= len(r.groups) {
 		return nil, false
 	}
-	if !StreamUpstreamEnabled(r.groups[index].Upstream) || r.groups[index].Default == nil {
+	if !StreamUpstreamEnabled(r.groups[index].Upstream) || !StreamUpstreamServeStream(r.groups[index].Upstream) || r.groups[index].Default == nil {
 		return nil, false
 	}
 	return r.groups[index].Default, true
@@ -262,6 +314,49 @@ func (r *StreamManager) StreamCapabilities(name string) (*StreamCapabilitiesResp
 	}
 	resp.Capabilities = caps
 	return resp, true, nil
+}
+
+func (r *StreamManager) CalibrationTargets(name, quality string) []*Stream {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	targets := make([]*Stream, 0, 4)
+	seen := make(map[string]struct{})
+	appendStream := func(stream *Stream) {
+		if stream == nil {
+			return
+		}
+		if _, ok := seen[stream.Name]; ok {
+			return
+		}
+		seen[stream.Name] = struct{}{}
+		targets = append(targets, stream)
+	}
+
+	if stream, ok := r.streamByNameQualityLocked(name, quality, false); ok {
+		appendStream(stream)
+	}
+	for _, group := range r.groups {
+		if group == nil || group.Upstream == nil || group.Upstream.CalibrationFrom != name || len(group.Streams) == 0 {
+			continue
+		}
+		if quality == "" {
+			appendStream(group.Default)
+			continue
+		}
+		matched := false
+		for _, stream := range group.Streams {
+			if strings.EqualFold(stream.RenditionName, quality) {
+				appendStream(stream)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			appendStream(group.Default)
+		}
+	}
+	return targets
 }
 
 func (r *StreamManager) StreamCreate(req *StreamApiRequest) (*StreamApiResponse, error) {
@@ -391,19 +486,26 @@ func (r *StreamManager) StreamModeUpdate(name string, req *ModeRequest) (*Stream
 
 	oldUpstream := r.config.Upstreams[index]
 	upstream := &Upstream{
-		Name:        oldUpstream.Name,
-		SourceType:  oldUpstream.SourceType,
-		RtspUrl:     oldUpstream.RtspUrl,
-		Device:      oldUpstream.Device,
-		Path:        oldUpstream.Path,
-		Codec:       oldUpstream.Codec,
-		Width:       &req.Width,
-		Height:      &req.Height,
-		FrameRate:   req.FrameRate,
-		BitrateKbps: oldUpstream.BitrateKbps,
-		Enabled:     oldUpstream.Enabled,
-		OnDemand:    oldUpstream.OnDemand,
-		Renditions:  oldUpstream.Renditions,
+		Name:              oldUpstream.Name,
+		SourceType:        oldUpstream.SourceType,
+		RtspUrl:           oldUpstream.RtspUrl,
+		Device:            oldUpstream.Device,
+		Path:              oldUpstream.Path,
+		Codec:             oldUpstream.Codec,
+		Width:             &req.Width,
+		Height:            &req.Height,
+		FrameRate:         req.FrameRate,
+		BitrateKbps:       oldUpstream.BitrateKbps,
+		ServeStream:       oldUpstream.ServeStream,
+		CalibrationFrom:   oldUpstream.CalibrationFrom,
+		KeyframeSink:      oldUpstream.KeyframeSink,
+		KeyframeOutput:    oldUpstream.KeyframeOutput,
+		KeyframeFormat:    oldUpstream.KeyframeFormat,
+		KeyframeMqttURL:   oldUpstream.KeyframeMqttURL,
+		KeyframeMqttTopic: oldUpstream.KeyframeMqttTopic,
+		Enabled:           oldUpstream.Enabled,
+		OnDemand:          oldUpstream.OnDemand,
+		Renditions:        oldUpstream.Renditions,
 	}
 
 	group, err := r.streamGroupCreate(index, upstream)
@@ -575,16 +677,22 @@ func (r *StreamManager) streamCreate(groupName, renditionName string, upstream *
 	}
 
 	inst := webrtp.Init(&webrtp.Config{
-		SourceType:  sourceType,
-		Rtsp:        upstream.RtspUrl,
-		Device:      upstream.Device,
-		Path:        upstream.Path,
-		Codec:       upstream.Codec,
-		Width:       valueOrZero(upstream.Width),
-		Height:      valueOrZero(upstream.Height),
-		FrameRate:   frameRate,
-		BitrateKbps: bitrateKbps,
-		Logger:      logger,
+		SourceType:        sourceType,
+		StreamName:        streamName,
+		Rtsp:              upstream.RtspUrl,
+		Device:            upstream.Device,
+		Path:              upstream.Path,
+		Codec:             upstream.Codec,
+		Width:             valueOrZero(upstream.Width),
+		Height:            valueOrZero(upstream.Height),
+		FrameRate:         frameRate,
+		BitrateKbps:       bitrateKbps,
+		KeyframeSink:      upstream.KeyframeSink,
+		KeyframeOutput:    upstream.KeyframeOutput,
+		KeyframeFormat:    upstream.KeyframeFormat,
+		KeyframeMqttURL:   upstream.KeyframeMqttURL,
+		KeyframeMqttTopic: upstream.KeyframeMqttTopic,
+		Logger:            logger,
 	})
 	stream := &Stream{
 		Name:          streamName,
@@ -627,27 +735,36 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 	}
 	sourceType := StreamUpstreamSourceType(group.Upstream)
 	resp := &StreamApiResponse{
-		Index:           index,
-		Name:            group.Name,
-		SourceType:      sourceType,
-		RtspUrl:         group.Upstream.RtspUrl,
-		Device:          group.Upstream.Device,
-		Path:            group.Upstream.Path,
-		Codec:           group.Upstream.Codec,
-		Width:           group.Upstream.Width,
-		Height:          group.Upstream.Height,
-		FrameRate:       group.Upstream.FrameRate,
-		BitrateKbps:     group.Upstream.BitrateKbps,
-		Enabled:         StreamUpstreamEnabled(group.Upstream),
-		OnDemand:        group.Upstream.OnDemand,
-		Url:             "",
-		WsPath:          "",
-		Stats:           &stats,
-		ActiveRendition: "",
+		Index:             index,
+		Name:              group.Name,
+		SourceType:        sourceType,
+		RtspUrl:           group.Upstream.RtspUrl,
+		Device:            group.Upstream.Device,
+		Path:              group.Upstream.Path,
+		Codec:             group.Upstream.Codec,
+		Width:             group.Upstream.Width,
+		Height:            group.Upstream.Height,
+		FrameRate:         group.Upstream.FrameRate,
+		BitrateKbps:       group.Upstream.BitrateKbps,
+		ServeStream:       StreamUpstreamServeStream(group.Upstream),
+		CalibrationFrom:   group.Upstream.CalibrationFrom,
+		KeyframeSink:      group.Upstream.KeyframeSink,
+		KeyframeOutput:    group.Upstream.KeyframeOutput,
+		KeyframeFormat:    group.Upstream.KeyframeFormat,
+		KeyframeMqttURL:   group.Upstream.KeyframeMqttURL,
+		KeyframeMqttTopic: group.Upstream.KeyframeMqttTopic,
+		Enabled:           StreamUpstreamEnabled(group.Upstream),
+		OnDemand:          group.Upstream.OnDemand,
+		Url:               "",
+		WsPath:            "",
+		Stats:             &stats,
+		ActiveRendition:   "",
 	}
 	if group.Default != nil {
 		resp.Url = group.Default.Url
-		resp.WsPath = fmt.Sprintf("/stream/%s", group.Name)
+		if StreamUpstreamServeStream(group.Upstream) {
+			resp.WsPath = fmt.Sprintf("/stream/%s", group.Name)
+		}
 		resp.ActiveRendition = group.Default.RenditionName
 	}
 	if len(group.Streams) > 1 {
@@ -666,7 +783,7 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 				Name:        stream.RenditionName,
 				BitrateKbps: bitrate,
 				OnDemand:    stream.OnDemand,
-				WsPath:      fmt.Sprintf("/stream/%s", stream.Name),
+				WsPath:      streamWsPath(stream, group.Upstream),
 				Stats:       &stats,
 			})
 		}
@@ -736,6 +853,29 @@ func StreamValidateUpstream(upstream *Upstream) error {
 	default:
 		return fmt.Errorf("unsupported sourceType: %s", StreamUpstreamSourceType(upstream))
 	}
+	if upstream.KeyframeFormat != "" {
+		format := strings.ToLower(upstream.KeyframeFormat)
+		if format != "jpg" && format != "jpeg" && format != "png" {
+			return fmt.Errorf("keyframeFormat must be jpg or png")
+		}
+	}
+	sinks, err := parseKeyframeSinkTargets(upstream.KeyframeSink)
+	if err != nil {
+		return err
+	}
+	if sinks["fs"] && strings.TrimSpace(upstream.KeyframeOutput) == "" {
+		return fmt.Errorf("keyframeOutput is required when keyframeSink includes fs")
+	}
+	if sinks["mqtt"] {
+		if strings.TrimSpace(upstream.KeyframeMqttURL) == "" {
+			return fmt.Errorf("keyframeMqttUrl is required when keyframeSink includes mqtt")
+		}
+	}
+	if upstream.CalibrationFrom != "" {
+		if upstream.Name != nil && *upstream.Name == upstream.CalibrationFrom {
+			return fmt.Errorf("calibrationFrom cannot reference the same stream")
+		}
+	}
 	if len(upstream.Renditions) > 0 {
 		if StreamUpstreamSourceType(upstream) != "usb" {
 			return fmt.Errorf("renditions are only supported for usb streams")
@@ -760,22 +900,32 @@ func StreamValidateUpstream(upstream *Upstream) error {
 
 func StreamRequestUpstream(req *StreamApiRequest) (*Upstream, error) {
 	upstream := &Upstream{
-		Name:        req.Name,
-		SourceType:  req.SourceType,
-		RtspUrl:     req.RtspUrl,
-		Device:      req.Device,
-		Path:        req.Path,
-		Codec:       req.Codec,
-		Width:       req.Width,
-		Height:      req.Height,
-		FrameRate:   req.FrameRate,
-		BitrateKbps: req.BitrateKbps,
-		Enabled:     req.Enabled,
-		OnDemand:    req.OnDemand,
-		Renditions:  req.Renditions,
+		Name:              req.Name,
+		SourceType:        req.SourceType,
+		RtspUrl:           req.RtspUrl,
+		Device:            req.Device,
+		Path:              req.Path,
+		Codec:             req.Codec,
+		Width:             req.Width,
+		Height:            req.Height,
+		FrameRate:         req.FrameRate,
+		BitrateKbps:       req.BitrateKbps,
+		ServeStream:       req.ServeStream,
+		CalibrationFrom:   req.CalibrationFrom,
+		KeyframeSink:      req.KeyframeSink,
+		KeyframeOutput:    req.KeyframeOutput,
+		KeyframeFormat:    req.KeyframeFormat,
+		KeyframeMqttURL:   req.KeyframeMqttURL,
+		KeyframeMqttTopic: req.KeyframeMqttTopic,
+		Enabled:           req.Enabled,
+		OnDemand:          req.OnDemand,
+		Renditions:        req.Renditions,
 	}
 	if upstream.Enabled == nil {
 		upstream.Enabled = boolPtr(true)
+	}
+	if upstream.ServeStream == nil {
+		upstream.ServeStream = boolPtr(true)
 	}
 	if err := StreamValidateUpstream(upstream); err != nil {
 		return nil, err
@@ -805,23 +955,34 @@ func StreamUpstreamWithRendition(upstream *Upstream, rendition *Rendition) *Upst
 		onDemand = *rendition.OnDemand
 	}
 	return &Upstream{
-		Name:        &name,
-		SourceType:  &sourceType,
-		RtspUrl:     upstream.RtspUrl,
-		Device:      upstream.Device,
-		Path:        upstream.Path,
-		Codec:       upstream.Codec,
-		Width:       upstream.Width,
-		Height:      upstream.Height,
-		FrameRate:   upstream.FrameRate,
-		BitrateKbps: &bitrate,
-		Enabled:     upstream.Enabled,
-		OnDemand:    onDemand,
+		Name:              &name,
+		SourceType:        &sourceType,
+		RtspUrl:           upstream.RtspUrl,
+		Device:            upstream.Device,
+		Path:              upstream.Path,
+		Codec:             upstream.Codec,
+		Width:             upstream.Width,
+		Height:            upstream.Height,
+		FrameRate:         upstream.FrameRate,
+		BitrateKbps:       &bitrate,
+		ServeStream:       upstream.ServeStream,
+		CalibrationFrom:   upstream.CalibrationFrom,
+		KeyframeSink:      upstream.KeyframeSink,
+		KeyframeOutput:    upstream.KeyframeOutput,
+		KeyframeFormat:    upstream.KeyframeFormat,
+		KeyframeMqttURL:   upstream.KeyframeMqttURL,
+		KeyframeMqttTopic: upstream.KeyframeMqttTopic,
+		Enabled:           upstream.Enabled,
+		OnDemand:          onDemand,
 	}
 }
 
 func StreamUpstreamEnabled(upstream *Upstream) bool {
 	return upstream == nil || upstream.Enabled == nil || *upstream.Enabled
+}
+
+func StreamUpstreamServeStream(upstream *Upstream) bool {
+	return upstream == nil || upstream.ServeStream == nil || *upstream.ServeStream
 }
 
 func boolPtr(v bool) *bool {
@@ -839,4 +1000,32 @@ func valueOrZero(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+func streamWsPath(stream *Stream, upstream *Upstream) string {
+	if stream == nil || !StreamUpstreamServeStream(upstream) {
+		return ""
+	}
+	return fmt.Sprintf("/stream/%s", stream.Name)
+}
+
+func parseKeyframeSinkTargets(raw string) (map[string]bool, error) {
+	targets := make(map[string]bool)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return targets, nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		target := strings.ToLower(strings.TrimSpace(part))
+		if target == "" {
+			continue
+		}
+		switch target {
+		case "fs", "mqtt":
+			targets[target] = true
+		default:
+			return nil, fmt.Errorf("keyframeSink must contain fs and/or mqtt")
+		}
+	}
+	return targets, nil
 }

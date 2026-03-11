@@ -46,7 +46,7 @@
             position: fixed;
             top: 20px;
             left: 20px;
-            z-index: 2;
+            z-index: 5;
             width: min(420px, calc(100vw - 40px));
             height: auto;
             border: 1px solid var(--line);
@@ -298,7 +298,15 @@
         .desk-overlay canvas {
             width: 100% !important;
             height: 100% !important;
-            pointer-events: none;
+        }
+
+        .desk-overlay .konvajs-content {
+            pointer-events: auto !important;
+            touch-action: none;
+        }
+
+        .desk-overlay canvas {
+            pointer-events: auto !important;
         }
 
         .desk-handle {
@@ -393,6 +401,26 @@
             background: rgba(7, 12, 24, 0.92);
         }
 
+        .desk-preview-open {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.78);
+            color: var(--text);
+            padding: 7px 10px;
+            font: inherit;
+            text-decoration: none;
+            cursor: pointer;
+            transition: border-color 160ms ease, background 160ms ease;
+        }
+
+        .desk-preview-open:hover {
+            border-color: var(--line-strong);
+            background: rgba(7, 12, 24, 0.92);
+        }
+
         .desk-preview-panel.is-dragging,
         .desk-preview-panel.is-dragging .desk-preview-header {
             cursor: grabbing;
@@ -450,6 +478,47 @@
         .viewer video.is-hidden {
             opacity: 0;
             pointer-events: none;
+        }
+
+        body.deskview-only {
+            background: #000;
+        }
+
+        body.deskview-only .header,
+        body.deskview-only .viewer-grid-overlay,
+        body.deskview-only .desk-overlay,
+        body.deskview-only .desk-preview-header,
+        body.deskview-only .desk-preview-note,
+        body.deskview-only .desk-preview-resize {
+            display: none !important;
+        }
+
+        body.deskview-only .viewer video {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        body.deskview-only .desk-preview-panel {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            min-width: 0;
+            height: 100vh;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: #000;
+            box-shadow: none;
+            backdrop-filter: none;
+        }
+
+        body.deskview-only .desk-preview-surface {
+            width: 100%;
+            height: 100%;
+            aspect-ratio: auto;
+            border: 0;
+            border-radius: 0;
+            background: #000;
         }
 
 
@@ -838,9 +907,11 @@
                                 <span>Enable rectification</span>
                                 <input id="desk-view-enabled" type="checkbox" checked>
                             </label>
+                            <button id="desk-view-auto" class="effect-reset" type="button">Auto Detect</button>
                             <button id="desk-view-reset" class="effect-reset" type="button">Reset corners</button>
-                            <p class="controls-note">Drag the four overlay points over the desk corners. The preview is
-                                rebuilt from two triangles for the top-down view.</p>
+                            <p class="controls-note">Drag A-D onto the desk corners, then use AB and CD to mark the
+                                curved top and bottom edges. Auto Detect uses those six points to tune fisheye
+                                strength X and Y for the straightest result.</p>
                         </div>
                     </div>
                 </div>
@@ -857,17 +928,18 @@
                 <div class="desk-preview-header">
                     <div class="desk-preview-header-main">
                         <h2 class="desk-preview-title">Desk View</h2>
-                        <span id="desk-preview-meta" class="desk-preview-meta">4-point rectification</span>
+                        <span id="desk-preview-meta" class="desk-preview-meta">6-point desk calibration</span>
                     </div>
                     <div class="desk-preview-actions">
+                        <a id="desk-preview-open" class="desk-preview-open" href="#" target="_blank" rel="noopener noreferrer">Open Desk View</a>
                         <button id="desk-preview-fullscreen" class="desk-preview-fullscreen" type="button">Fullscreen</button>
                     </div>
                 </div>
                 <div class="desk-preview-surface">
                     <canvas id="desk-preview-canvas" class="desk-preview-canvas"></canvas>
                 </div>
-                <p class="desk-preview-note">Pull the corners into place to flatten the desk surface into a clean
-                    preview.</p>
+                <p class="desk-preview-note">Use the four corners plus the AB and CD edge points to flatten a curved
+                    desk into the cleanest preview.</p>
                 <div id="desk-preview-resize" class="desk-preview-resize" aria-hidden="true"></div>
             </section>
         </section>
@@ -1990,6 +2062,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             document.getElementById('bitrate').textContent = Math.round(liveBitrateKbps);
             document.getElementById('quality').textContent = selectedQuality(stream, requestedQuality);
             document.getElementById('bytes').textContent = formatRateFromKbps(liveBitrateKbps);
+            document.title = `${stream.name} · WebRTP Stream`;
         }
 
         function modeLabel(mode) {
@@ -2056,12 +2129,81 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             ];
         }
 
+        function defaultDeskGuides(points = defaultDeskPoints()) {
+            return [
+                midpoint(points[0], points[1], 'AB'),
+                midpoint(points[3], points[2], 'CD'),
+            ];
+        }
+
+        function pointSegmentDistance(point, start, end) {
+            const dx = end.x - start.x;
+            const dy = end.y - start.y;
+            const denom = dx * dx + dy * dy;
+            if (denom <= 0.000001) {
+                return Math.hypot(point.x - start.x, point.y - start.y);
+            }
+            const projection = ((point.x - start.x) * dx + (point.y - start.y) * dy) / denom;
+            const t = Math.min(1, Math.max(0, projection));
+            const closestX = start.x + dx * t;
+            const closestY = start.y + dy * t;
+            return Math.hypot(point.x - closestX, point.y - closestY);
+        }
+
+        function remapGuidePointForEdge(guidePoint, oldStart, oldEnd, newStart, newEnd, label = '') {
+            const oldDx = oldEnd.x - oldStart.x;
+            const oldDy = oldEnd.y - oldStart.y;
+            const oldLenSq = oldDx * oldDx + oldDy * oldDy;
+            const newDx = newEnd.x - newStart.x;
+            const newDy = newEnd.y - newStart.y;
+            const newLen = Math.hypot(newDx, newDy);
+            if (oldLenSq <= 0.000001 || newLen <= 0.000001) {
+                return midpoint(newStart, newEnd, label);
+            }
+            const relX = guidePoint.x - oldStart.x;
+            const relY = guidePoint.y - oldStart.y;
+            const t = ((relX * oldDx) + (relY * oldDy)) / oldLenSq;
+            const oldLen = Math.sqrt(oldLenSq);
+            const nx = -oldDy / oldLen;
+            const ny = oldDx / oldLen;
+            const offset = relX * nx + relY * ny;
+            const newNx = -newDy / newLen;
+            const newNy = newDx / newLen;
+            return {
+                x: clamp01(newStart.x + newDx * t + newNx * offset),
+                y: clamp01(newStart.y + newDy * t + newNy * offset),
+                label,
+            };
+        }
+
+        function midpoint(a, b, label = '') {
+            return {
+                x: (Number(a?.x || 0) + Number(b?.x || 0)) / 2,
+                y: (Number(a?.y || 0) + Number(b?.y || 0)) / 2,
+                label,
+            };
+        }
+
         function cloneDeskPoints(points) {
             return (Array.isArray(points) ? points : []).map((point, index) => ({
                 x: clamp01(point?.x),
                 y: clamp01(point?.y),
                 label: point?.label || defaultDeskPoints()[index]?.label || String(index + 1),
             }));
+        }
+
+        function cloneDeskGuides(points, fallback = defaultDeskGuides()) {
+            return (Array.isArray(points) ? points : []).map((point, index) => ({
+                x: clamp01(point?.x),
+                y: clamp01(point?.y),
+                label: point?.label || fallback[index]?.label || (index === 0 ? 'AB' : 'CD'),
+            }));
+        }
+
+        function pointSignature(points) {
+            return (Array.isArray(points) ? points : [])
+                .map((point) => `${Number(point?.x || 0).toFixed(4)},${Number(point?.y || 0).toFixed(4)}`)
+                .join(';');
         }
 
         function triangleArea(a, b, c) {
@@ -2216,12 +2358,83 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             return clipToTexture(sampleClipFromOutputClip(outputClip, effectSettings));
         }
 
+        function pointLineDistance(point, start, end) {
+            const dx = end.x - start.x;
+            const dy = end.y - start.y;
+            const length = Math.hypot(dx, dy);
+            if (length <= 0.000001) {
+                return Math.hypot(point.x - start.x, point.y - start.y);
+            }
+            return Math.abs(dy * point.x - dx * point.y + end.x * start.y - end.y * start.x) / length;
+        }
+
+        function serializeDeskPoints(points) {
+            return cloneDeskPoints(points)
+                .map((point) => `${point.x.toFixed(4)},${point.y.toFixed(4)}`)
+                .join(';');
+        }
+
+        function parseDeskPoints(value) {
+            if (!value) {
+                return null;
+            }
+            const parts = String(value).split(';');
+            if (parts.length !== 4) {
+                return null;
+            }
+            const parsed = parts.map((part, index) => {
+                const [x, y] = part.split(',');
+                const px = Number(x);
+                const py = Number(y);
+                if (!Number.isFinite(px) || !Number.isFinite(py)) {
+                    return null;
+                }
+                return {
+                    x: clamp01(px),
+                    y: clamp01(py),
+                    label: defaultDeskPoints()[index].label,
+                };
+            });
+            return parsed.every(Boolean) ? parsed : null;
+        }
+
+        function parseDeskGuides(value, fallback = defaultDeskGuides()) {
+            if (!value) {
+                return null;
+            }
+            const parts = String(value).split(';');
+            if (parts.length !== 2) {
+                return null;
+            }
+            const parsed = parts.map((part, index) => {
+                const [x, y] = part.split(',');
+                const px = Number(x);
+                const py = Number(y);
+                if (!Number.isFinite(px) || !Number.isFinite(py)) {
+                    return null;
+                }
+                return {
+                    x: clamp01(px),
+                    y: clamp01(py),
+                    label: fallback[index]?.label || (index === 0 ? 'AB' : 'CD'),
+                };
+            });
+            return parsed.every(Boolean) ? parsed : null;
+        }
+
         async function main() {
             const initialParams = new URLSearchParams(location.search);
+            const isDeskViewOnly = location.pathname.startsWith('/deskview/');
+            const deskViewSyncParam = 'deskviewSync';
+            const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+            const deskViewSyncId = hashParams.get(deskViewSyncParam) || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
             let activeName = decodeURIComponent(location.pathname.split('/').pop() || '');
             let activeQuality = initialParams.get('quality') || '';
             let pendingQuality = '';
             let pendingName = '';
+            if (isDeskViewOnly) {
+                document.body.classList.add('deskview-only');
+            }
             const titleEl = document.getElementById('stream-title');
             const metaEl = document.getElementById('stream-meta');
             const streamSelect = document.getElementById('stream-select');
@@ -2236,6 +2449,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const fisheyeFyInput = document.getElementById('fisheye-fy-input');
             const fisheyeScaleInput = document.getElementById('fisheye-scale-input');
             const deskViewEnabled = document.getElementById('desk-view-enabled');
+            const deskViewAuto = document.getElementById('desk-view-auto');
             const deskViewReset = document.getElementById('desk-view-reset');
             const headerEl = document.getElementById('stream-header');
             const headerToggle = document.getElementById('header-toggle');
@@ -2249,6 +2463,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const deskPreviewResize = document.getElementById('desk-preview-resize');
             const deskPreviewCanvas = document.getElementById('desk-preview-canvas');
             const deskPreviewMeta = document.getElementById('desk-preview-meta');
+            const deskPreviewOpen = document.getElementById('desk-preview-open');
             const deskPreviewFullscreen = document.getElementById('desk-preview-fullscreen');
             let lastStatusMessage = { streams: [] };
             const capabilityCache = new Map();
@@ -2257,6 +2472,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
             const headerStorageKey = 'webrtp:stream-header-layout';
             const deskStorageKey = 'webrtp:desk-view-points';
+            const deskGuideStorageKey = 'webrtp:desk-guide-points';
             const deskPanelStorageKey = 'webrtp:desk-view-panel-layout';
             const effectDefaults = {
                 enabled: false,
@@ -2272,15 +2488,50 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const deskState = {
                 enabled: true,
                 points: defaultDeskPoints(),
+                guides: defaultDeskGuides(),
                 stage: null,
                 layer: null,
                 polygon: null,
+                path: null,
                 dimmer: null,
                 handles: [],
+                guideHandles: [],
                 handleDragState: null,
+                guideDragState: null,
                 previewRenderer: null,
                 dragState: null,
                 resizeState: null,
+            };
+            const createDeskGuideHandle = (labelText) => {
+                const group = new Konva.Group({
+                    x: 0,
+                    y: 0,
+                    listening: true,
+                });
+                const outer = new Konva.Circle({
+                    radius: 7,
+                    fill: 'rgba(15, 23, 42, 0.85)',
+                    stroke: 'rgba(224, 242, 254, 0.9)',
+                    strokeWidth: 2,
+                    shadowColor: 'rgba(56, 189, 248, 0.35)',
+                    shadowBlur: 12,
+                });
+                const inner = new Konva.Circle({
+                    radius: 3,
+                    fill: '#7dd3fc',
+                });
+                const label = new Konva.Text({
+                    x: 10,
+                    y: -8,
+                    text: labelText,
+                    fontSize: 12,
+                    fontStyle: 'bold',
+                    fill: '#f8fbff',
+                });
+                group.add(outer);
+                group.add(inner);
+                group.add(label);
+                return group;
             };
             const updateEffectValue = (id, value, digits = 2) => {
                 document.getElementById(id).textContent = Number(value || 0).toFixed(digits);
@@ -2315,21 +2566,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 fisheyeEnabledCollapsed.checked = effectState.enabled;
             };
             const updateEffectQueryParams = () => {
-                const url = new URL(location.href);
-                if (effectState.enabled) {
-                    url.searchParams.set('distort', '1');
-                } else {
-                    url.searchParams.delete('distort');
-                }
-                url.searchParams.set('fx', effectState.fx.toFixed(2));
-                url.searchParams.set('fy', effectState.fy.toFixed(2));
-                url.searchParams.set('scale', effectState.scale.toFixed(2));
-                history.replaceState(null, '', url);
+                updateDeskViewLink();
             };
             const scheduleEffectQueryParamsUpdate = () => {
                 clearTimeout(effectQueryUpdateTimer);
                 effectQueryUpdateTimer = setTimeout(() => {
                     updateEffectQueryParams();
+                    sendDeskViewSync();
                 }, 150);
             };
             const syncEffectState = () => {
@@ -2372,6 +2615,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
                 return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
             };
+            const buildDeskViewSyncPayload = () => ({
+                name: pendingName || activeName,
+                quality: pendingQuality || activeQuality,
+                distort: effectState.enabled,
+                gridEnabled: fisheyeGridEnabled.checked,
+                deskEnabled: deskState.enabled,
+                fx: Number(effectState.fx.toFixed(2)),
+                fy: Number(effectState.fy.toFixed(2)),
+                scale: Number(effectState.scale.toFixed(2)),
+                desk: serializeDeskPoints(deskState.points),
+                guides: serializeDeskPoints(deskState.guides),
+            });
             const loadCapabilities = async (streamName) => {
                 if (!streamName) return;
                 if (capabilityCache.has(streamName)) {
@@ -2413,10 +2668,34 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     return null;
                 }
             };
+            const readStoredDeskGuides = (fallback) => {
+                try {
+                    const raw = sessionStorage.getItem(deskGuideStorageKey);
+                    if (!raw) {
+                        return null;
+                    }
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed) || parsed.length !== 2) {
+                        return null;
+                    }
+                    return cloneDeskGuides(parsed, fallback);
+                } catch (_) {
+                    return null;
+                }
+            };
             const persistDeskPoints = () => {
                 try {
                     sessionStorage.setItem(deskStorageKey, JSON.stringify(deskState.points.map(({ x, y, label }) => ({ x, y, label }))));
                 } catch (_) { }
+                updateEffectQueryParams();
+                sendDeskViewSync();
+            };
+            const persistDeskGuides = () => {
+                try {
+                    sessionStorage.setItem(deskGuideStorageKey, JSON.stringify(deskState.guides.map(({ x, y, label }) => ({ x, y, label }))));
+                } catch (_) { }
+                updateEffectQueryParams();
+                sendDeskViewSync();
             };
             const readStoredDeskPanelLayout = () => {
                 try {
@@ -2482,18 +2761,62 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     label: point.label,
                 };
             });
+            const getDeskGuideStagePoints = (layout = getActiveVideoLayout()) => deskState.guides.map((point) => {
+                const displayPoint = sourceToDisplayTexture(point, effectState);
+                return {
+                    x: layout.offsetX + displayPoint.x * layout.displayWidth,
+                    y: layout.offsetY + displayPoint.y * layout.displayHeight,
+                    label: point.label,
+                };
+            });
             const setDeskPointsFromStage = (stagePoints, layout = getActiveVideoLayout()) => {
                 if (!layout.displayWidth || !layout.displayHeight || !Array.isArray(stagePoints) || stagePoints.length !== 4) {
                     return;
                 }
-                deskState.points = stagePoints.map((point, index) => ({
+                const previousPoints = cloneDeskPoints(deskState.points);
+                const previousGuides = cloneDeskGuides(deskState.guides, defaultDeskGuides(previousPoints));
+                const nextPoints = stagePoints.map((point, index) => ({
                     ...displayToSourceTexture({
                         x: clamp01((point.x - layout.offsetX) / layout.displayWidth),
                         y: clamp01((point.y - layout.offsetY) / layout.displayHeight),
                     }, effectState),
                     label: deskState.points[index]?.label || defaultDeskPoints()[index].label,
                 }));
+                deskState.points = nextPoints;
+                deskState.guides = [
+                    remapGuidePointForEdge(
+                        previousGuides[0] || midpoint(previousPoints[0], previousPoints[1], 'AB'),
+                        previousPoints[0],
+                        previousPoints[1],
+                        nextPoints[0],
+                        nextPoints[1],
+                        'AB',
+                    ),
+                    remapGuidePointForEdge(
+                        previousGuides[1] || midpoint(previousPoints[3], previousPoints[2], 'CD'),
+                        previousPoints[3],
+                        previousPoints[2],
+                        nextPoints[3],
+                        nextPoints[2],
+                        'CD',
+                    ),
+                ];
                 persistDeskPoints();
+                persistDeskGuides();
+                syncDeskOverlay();
+            };
+            const setDeskGuidesFromStage = (stagePoints, layout = getActiveVideoLayout()) => {
+                if (!layout.displayWidth || !layout.displayHeight || !Array.isArray(stagePoints) || stagePoints.length !== 2) {
+                    return;
+                }
+                deskState.guides = stagePoints.map((point, index) => ({
+                    ...displayToSourceTexture({
+                        x: clamp01((point.x - layout.offsetX) / layout.displayWidth),
+                        y: clamp01((point.y - layout.offsetY) / layout.displayHeight),
+                    }, effectState),
+                    label: deskState.guides[index]?.label || (index === 0 ? 'AB' : 'CD'),
+                }));
+                persistDeskGuides();
                 syncDeskOverlay();
             };
             const setDeskViewEnabled = (enabled) => {
@@ -2580,25 +2903,274 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 deskState.stage.size({ width, height });
                 deskState.dimmer.size({ width, height });
                 const stagePoints = getDeskStagePoints(layout);
+                const guidePoints = getDeskGuideStagePoints(layout);
                 const flatPoints = stagePoints.flatMap((point) => [point.x, point.y]);
+                const pathPoints = [
+                    stagePoints[0],
+                    guidePoints[0],
+                    stagePoints[1],
+                    stagePoints[2],
+                    guidePoints[1],
+                    stagePoints[3],
+                ].flatMap((point) => [point.x, point.y]);
                 deskState.polygon.points(flatPoints);
+                deskState.path.points(pathPoints);
                 deskState.handles.forEach((handle, index) => {
                     handle.style.left = `${stagePoints[index].x}px`;
                     handle.style.top = `${stagePoints[index].y}px`;
+                });
+                deskState.guideHandles.forEach((handle, index) => {
+                    handle.position({
+                        x: guidePoints[index].x,
+                        y: guidePoints[index].y,
+                    });
                 });
                 updateDeskPreviewMeta(layout);
                 deskState.layer.batchDraw();
             };
             const resetDeskView = () => {
                 deskState.points = cloneDeskPoints(defaultDeskPoints());
+                deskState.guides = cloneDeskGuides(defaultDeskGuides(deskState.points), defaultDeskGuides(deskState.points));
                 persistDeskPoints();
+                persistDeskGuides();
                 syncDeskOverlay();
+            };
+            const sampleFrameLuma = (canvas, maxWidth = 320) => {
+                if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+                    return null;
+                }
+                const scale = Math.min(1, maxWidth / canvas.width);
+                const width = Math.max(32, Math.round(canvas.width * scale));
+                const height = Math.max(24, Math.round(canvas.height * scale));
+                const sampleCanvas = document.createElement('canvas');
+                sampleCanvas.width = width;
+                sampleCanvas.height = height;
+                const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+                if (!sampleCtx) {
+                    return null;
+                }
+                sampleCtx.drawImage(canvas, 0, 0, width, height);
+                const data = sampleCtx.getImageData(0, 0, width, height).data;
+                const luma = new Float32Array(width * height);
+                for (let i = 0, p = 0; i < luma.length; i++, p += 4) {
+                    luma[i] = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
+                }
+                return { width, height, luma };
+            };
+            const lumaAt = (sample, x, y) => {
+                const xx = Math.min(sample.width - 1, Math.max(0, x));
+                const yy = Math.min(sample.height - 1, Math.max(0, y));
+                return sample.luma[yy * sample.width + xx];
+            };
+            const detectDeskFromFrame = () => {
+                const sample = sampleFrameLuma(activePlayer?.canvas || activePlayer?.renderCanvas, 320);
+                if (!sample) {
+                    return null;
+                }
+                const topStart = Math.floor(sample.height * 0.12);
+                const topEnd = Math.floor(sample.height * 0.58);
+                let bestTopY = topStart;
+                let bestTopScore = -Infinity;
+                for (let y = topStart; y < topEnd; y++) {
+                    let score = 0;
+                    let count = 0;
+                    for (let x = Math.floor(sample.width * 0.12); x < Math.floor(sample.width * 0.88); x += 2) {
+                        const above = lumaAt(sample, x, y - 2);
+                        const below = lumaAt(sample, x, y + 2);
+                        score += Math.max(0, below - above) + Math.abs(below - above) * 0.35;
+                        count++;
+                    }
+                    score /= Math.max(1, count);
+                    if (score > bestTopScore) {
+                        bestTopScore = score;
+                        bestTopY = y;
+                    }
+                }
+                const bottomStart = Math.max(bestTopY + 10, Math.floor(sample.height * 0.52));
+                const bottomEnd = Math.floor(sample.height * 0.96);
+                let bestBottomY = bottomStart;
+                let bestBottomScore = -Infinity;
+                for (let y = bottomStart; y < bottomEnd; y++) {
+                    let score = 0;
+                    let count = 0;
+                    for (let x = Math.floor(sample.width * 0.1); x < Math.floor(sample.width * 0.9); x += 2) {
+                        const above = lumaAt(sample, x, y - 2);
+                        const below = lumaAt(sample, x, y + 2);
+                        score += Math.max(0, above - below) + Math.abs(below - above) * 0.25;
+                        count++;
+                    }
+                    score /= Math.max(1, count);
+                    if (score > bestBottomScore) {
+                        bestBottomScore = score;
+                        bestBottomY = y;
+                    }
+                }
+                const detectVerticalEdge = (fromLeft) => {
+                    const startX = fromLeft ? Math.floor(sample.width * 0.02) : Math.floor(sample.width * 0.65);
+                    const endX = fromLeft ? Math.floor(sample.width * 0.35) : Math.floor(sample.width * 0.98);
+                    let bestX = startX;
+                    let bestScore = -Infinity;
+                    for (let x = startX; x < endX; x++) {
+                        let score = 0;
+                        let count = 0;
+                        for (let y = bestTopY + 4; y < bestBottomY - 4; y += 2) {
+                            const left = lumaAt(sample, x - 2, y);
+                            const right = lumaAt(sample, x + 2, y);
+                            const delta = fromLeft ? right - left : left - right;
+                            score += Math.max(0, delta) + Math.abs(delta) * 0.2;
+                            count++;
+                        }
+                        score /= Math.max(1, count);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestX = x;
+                        }
+                    }
+                    return bestX;
+                };
+                const leftX = detectVerticalEdge(true);
+                const rightX = detectVerticalEdge(false);
+                if (!(rightX > leftX + sample.width * 0.2 && bestBottomY > bestTopY + sample.height * 0.18)) {
+                    return null;
+                }
+                const refineRowPeak = (x0, x1, yCenter, mode) => {
+                    let bestY = yCenter;
+                    let bestScore = -Infinity;
+                    const yMin = Math.max(2, yCenter - Math.floor(sample.height * 0.08));
+                    const yMax = Math.min(sample.height - 3, yCenter + Math.floor(sample.height * 0.08));
+                    for (let y = yMin; y <= yMax; y++) {
+                        let score = 0;
+                        let count = 0;
+                        for (let x = x0; x <= x1; x += 2) {
+                            const above = lumaAt(sample, x, y - 2);
+                            const below = lumaAt(sample, x, y + 2);
+                            const delta = mode === 'top' ? below - above : above - below;
+                            score += Math.max(0, delta);
+                            count++;
+                        }
+                        score /= Math.max(1, count);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestY = y;
+                        }
+                    }
+                    return bestY;
+                };
+                const inset = Math.max(2, Math.round((rightX - leftX) * 0.05));
+                const tlY = refineRowPeak(leftX, Math.min(sample.width - 1, leftX + inset * 3), bestTopY, 'top');
+                const trY = refineRowPeak(Math.max(0, rightX - inset * 3), rightX, bestTopY, 'top');
+                const blY = refineRowPeak(leftX, Math.min(sample.width - 1, leftX + inset * 3), bestBottomY, 'bottom');
+                const brY = refineRowPeak(Math.max(0, rightX - inset * 3), rightX, bestBottomY, 'bottom');
+                const centerX = Math.round((leftX + rightX) / 2);
+                const centerInset = Math.max(4, Math.round((rightX - leftX) * 0.14));
+                const topMidY = refineRowPeak(
+                    Math.max(leftX, centerX - centerInset),
+                    Math.min(rightX, centerX + centerInset),
+                    bestTopY,
+                    'top',
+                );
+                const bottomMidY = refineRowPeak(
+                    Math.max(leftX, centerX - centerInset),
+                    Math.min(rightX, centerX + centerInset),
+                    bestBottomY,
+                    'bottom',
+                );
+                const detectedPoints = [
+                    { x: leftX / sample.width, y: tlY / sample.height, label: 'A' },
+                    { x: rightX / sample.width, y: trY / sample.height, label: 'B' },
+                    { x: rightX / sample.width, y: brY / sample.height, label: 'C' },
+                    { x: leftX / sample.width, y: blY / sample.height, label: 'D' },
+                ];
+                const topWidth = Math.hypot(detectedPoints[1].x - detectedPoints[0].x, detectedPoints[1].y - detectedPoints[0].y);
+                const bottomWidth = Math.hypot(detectedPoints[2].x - detectedPoints[3].x, detectedPoints[2].y - detectedPoints[3].y);
+                const leftHeight = Math.hypot(detectedPoints[3].x - detectedPoints[0].x, detectedPoints[3].y - detectedPoints[0].y);
+                const rightHeight = Math.hypot(detectedPoints[2].x - detectedPoints[1].x, detectedPoints[2].y - detectedPoints[1].y);
+                const widthBias = (bottomWidth - topWidth) / Math.max(0.001, bottomWidth + topWidth);
+                const heightBias = (rightHeight - leftHeight) / Math.max(0.001, rightHeight + leftHeight);
+                return {
+                    points: detectedPoints,
+                    guides: [
+                        { x: centerX / sample.width, y: topMidY / sample.height, label: 'AB' },
+                        { x: centerX / sample.width, y: bottomMidY / sample.height, label: 'CD' },
+                    ],
+                    scale: clampEffectValue(1 + Math.max(Math.abs(widthBias), Math.abs(heightBias)) * 0.35, 0.5, 3, 1),
+                };
+            };
+            const optimizeDeskDistortion = (points, guides) => {
+                const normalizedPoints = cloneDeskPoints(points);
+                const fallbackGuides = defaultDeskGuides(normalizedPoints);
+                const normalizedGuides = cloneDeskGuides(guides, fallbackGuides);
+                let bestFx = clampEffectValue(effectState.fx, -0.25, 0.25, 0);
+                let bestFy = clampEffectValue(effectState.fy, -0.25, 0.25, 0);
+                let bestScore = Number.POSITIVE_INFINITY;
+                const scoreCandidate = (fx, fy) => {
+                    const settings = { enabled: true, fx, fy, scale: 1, lensA: 1, lensB: 1 };
+                    const mappedCorners = normalizedPoints.map((point) => sourceToDisplayTexture(point, settings));
+                    const mappedGuides = normalizedGuides.map((point) => sourceToDisplayTexture(point, settings));
+                    const topLineError = pointLineDistance(mappedGuides[0], mappedCorners[0], mappedCorners[1]);
+                    const bottomLineError = pointLineDistance(mappedGuides[1], mappedCorners[3], mappedCorners[2]);
+                    const topSegmentError = pointSegmentDistance(mappedGuides[0], mappedCorners[0], mappedCorners[1]);
+                    const bottomSegmentError = pointSegmentDistance(mappedGuides[1], mappedCorners[3], mappedCorners[2]);
+                    const topSlopeError = Math.abs(mappedCorners[0].y - mappedCorners[1].y);
+                    const bottomSlopeError = Math.abs(mappedCorners[3].y - mappedCorners[2].y);
+                    const topMidpointError = Math.abs(mappedGuides[0].y - ((mappedCorners[0].y + mappedCorners[1].y) / 2));
+                    const bottomMidpointError = Math.abs(mappedGuides[1].y - ((mappedCorners[3].y + mappedCorners[2].y) / 2));
+                    return topLineError * 8
+                        + bottomLineError * 8
+                        + topSegmentError * 5
+                        + bottomSegmentError * 5
+                        + topMidpointError * 6
+                        + bottomMidpointError * 6
+                        + topSlopeError * 2
+                        + bottomSlopeError * 2;
+                };
+                const steps = [0.12, 0.06, 0.03, 0.015, 0.008];
+                for (const step of steps) {
+                    const baseFx = bestFx;
+                    const baseFy = bestFy;
+                    for (let ix = -3; ix <= 3; ix++) {
+                        for (let iy = -3; iy <= 3; iy++) {
+                            const fx = clampEffectValue(baseFx + ix * step, -0.25, 0.25, 0);
+                            const fy = clampEffectValue(baseFy + iy * step, -0.25, 0.25, 0);
+                            const score = scoreCandidate(fx, fy);
+                            if (score < bestScore) {
+                                bestScore = score;
+                                bestFx = fx;
+                                bestFy = fy;
+                            }
+                        }
+                    }
+                }
+                return { fx: bestFx, fy: bestFy };
+            };
+            const autoDetectDeskView = () => {
+                const detection = detectDeskFromFrame();
+                let pointsForOptimization = cloneDeskPoints(deskState.points);
+                let guidesForOptimization = cloneDeskGuides(deskState.guides, defaultDeskGuides(pointsForOptimization));
+                if (!pointsForOptimization?.length) {
+                    deskPreviewMeta.textContent = 'Auto detect failed';
+                    return;
+                }
+                if (!guidesForOptimization?.length) {
+                    guidesForOptimization = cloneDeskGuides(defaultDeskGuides(pointsForOptimization), defaultDeskGuides(pointsForOptimization));
+                }
+                const optimized = optimizeDeskDistortion(pointsForOptimization, guidesForOptimization);
+                setEffectEnabled(true);
+                fisheyeFx.value = String(optimized.fx);
+                fisheyeFy.value = String(optimized.fy);
+                fisheyeScale.value = String(detection?.scale || fisheyeScale.value || effectDefaults.scale);
+                persistDeskPoints();
+                persistDeskGuides();
+                syncEffectState();
+                syncDeskOverlay();
+                drawDeskPreview();
             };
             const initDeskOverlay = () => {
                 if (!deskOverlay || !window.Konva || deskState.stage) {
                     return;
                 }
-                deskState.points = readStoredDeskPoints() || cloneDeskPoints(defaultDeskPoints());
+                deskState.points = parseDeskPoints(initialParams.get('desk')) || readStoredDeskPoints() || cloneDeskPoints(defaultDeskPoints());
+                deskState.guides = readStoredDeskGuides(defaultDeskGuides(deskState.points)) || cloneDeskGuides(defaultDeskGuides(deskState.points), defaultDeskGuides(deskState.points));
                 deskState.stage = new Konva.Stage({
                     container: deskOverlay,
                     width: Math.max(1, viewerEl?.clientWidth || 1),
@@ -2617,6 +3189,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     closed: true,
                     points: [],
                     fill: 'rgba(56, 189, 248, 0.14)',
+                    strokeEnabled: false,
+                    listening: false,
+                });
+                deskState.path = new Konva.Line({
+                    closed: true,
+                    points: [],
                     stroke: '#7dd3fc',
                     strokeWidth: 2,
                     shadowColor: 'rgba(34, 211, 238, 0.4)',
@@ -2626,6 +3204,40 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 });
                 deskState.layer.add(deskState.dimmer);
                 deskState.layer.add(deskState.polygon);
+                deskState.layer.add(deskState.path);
+                deskState.guideHandles = [
+                    createDeskGuideHandle('AB'),
+                    createDeskGuideHandle('CD'),
+                ];
+                deskState.guideHandles.forEach((guide) => {
+                    guide.draggable(true);
+                    guide.on('dragstart', () => {
+                        deskState.guideDragState = true;
+                    });
+                    guide.on('dragmove', () => {
+                        if (!deskState.guideDragState) {
+                            return;
+                        }
+                        const layout = getActiveVideoLayout();
+                        const minX = layout.offsetX;
+                        const maxX = layout.offsetX + layout.displayWidth;
+                        const minY = layout.offsetY;
+                        const maxY = layout.offsetY + layout.displayHeight;
+                        const nextGuidePoints = deskState.guideHandles.map((item) => {
+                            const pos = item.position();
+                            return {
+                                x: Math.min(Math.max(pos.x, minX), maxX),
+                                y: Math.min(Math.max(pos.y, minY), maxY),
+                            };
+                        });
+                        setDeskGuidesFromStage(nextGuidePoints, layout);
+                        drawDeskPreview();
+                    });
+                    guide.on('dragend', () => {
+                        deskState.guideDragState = null;
+                    });
+                    deskState.layer.add(guide);
+                });
                 deskState.handles = deskState.points.map((point, index) => {
                     const handle = document.createElement('button');
                     handle.type = 'button';
@@ -2949,219 +3561,221 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 return Boolean(target.closest('button, input, select, label, a, video, .resize-handle'));
             };
             updateHeaderState(true);
-            const storedHeaderLayout = readStoredHeaderLayout();
-            if (storedHeaderLayout) {
-                if (Number.isFinite(storedHeaderLayout.width) && Number.isFinite(storedHeaderLayout.height)) {
-                    const initialSize = clampHeaderSize(
-                        storedHeaderLayout.width,
-                        storedHeaderLayout.height,
-                        Number.isFinite(storedHeaderLayout.left) ? storedHeaderLayout.left : headerEl.getBoundingClientRect().left,
-                        Number.isFinite(storedHeaderLayout.top) ? storedHeaderLayout.top : headerEl.getBoundingClientRect().top,
-                    );
-                    headerEl.style.width = `${initialSize.width}px`;
-                    expandedHeaderHeight = initialSize.height;
+            if (!isDeskViewOnly) {
+                const storedHeaderLayout = readStoredHeaderLayout();
+                if (storedHeaderLayout) {
+                    if (Number.isFinite(storedHeaderLayout.width) && Number.isFinite(storedHeaderLayout.height)) {
+                        const initialSize = clampHeaderSize(
+                            storedHeaderLayout.width,
+                            storedHeaderLayout.height,
+                            Number.isFinite(storedHeaderLayout.left) ? storedHeaderLayout.left : headerEl.getBoundingClientRect().left,
+                            Number.isFinite(storedHeaderLayout.top) ? storedHeaderLayout.top : headerEl.getBoundingClientRect().top,
+                        );
+                        headerEl.style.width = `${initialSize.width}px`;
+                        expandedHeaderHeight = initialSize.height;
+                    }
+                    if (Number.isFinite(storedHeaderLayout.left) && Number.isFinite(storedHeaderLayout.top)) {
+                        setHeaderPosition(storedHeaderLayout.left, storedHeaderLayout.top);
+                    } else {
+                        persistHeaderLayout();
+                    }
                 }
-                if (Number.isFinite(storedHeaderLayout.left) && Number.isFinite(storedHeaderLayout.top)) {
-                    setHeaderPosition(storedHeaderLayout.left, storedHeaderLayout.top);
-                } else {
-                    persistHeaderLayout();
+                const storedDeskPanelLayout = readStoredDeskPanelLayout();
+                if (storedDeskPanelLayout) {
+                    if (Number.isFinite(storedDeskPanelLayout.width)) {
+                        const initialDeskSize = clampDeskPanelSize(
+                            storedDeskPanelLayout.width,
+                            Number.isFinite(storedDeskPanelLayout.left) ? storedDeskPanelLayout.left : deskPreviewPanel.getBoundingClientRect().left,
+                        );
+                        deskPreviewPanel.style.width = `${initialDeskSize.width}px`;
+                        deskPreviewPanel.style.height = 'auto';
+                    }
+                    if (Number.isFinite(storedDeskPanelLayout.left) && Number.isFinite(storedDeskPanelLayout.top)) {
+                        setDeskPanelPosition(storedDeskPanelLayout.left, storedDeskPanelLayout.top);
+                    } else {
+                        persistDeskPanelLayout();
+                    }
                 }
-            }
-            const storedDeskPanelLayout = readStoredDeskPanelLayout();
-            if (storedDeskPanelLayout) {
-                if (Number.isFinite(storedDeskPanelLayout.width)) {
-                    const initialDeskSize = clampDeskPanelSize(
-                        storedDeskPanelLayout.width,
-                        Number.isFinite(storedDeskPanelLayout.left) ? storedDeskPanelLayout.left : deskPreviewPanel.getBoundingClientRect().left,
-                    );
-                    deskPreviewPanel.style.width = `${initialDeskSize.width}px`;
-                    deskPreviewPanel.style.height = 'auto';
-                }
-                if (Number.isFinite(storedDeskPanelLayout.left) && Number.isFinite(storedDeskPanelLayout.top)) {
-                    setDeskPanelPosition(storedDeskPanelLayout.left, storedDeskPanelLayout.top);
-                } else {
-                    persistDeskPanelLayout();
-                }
-            }
-            headerToggle.addEventListener('click', () => {
-                if (dragState && dragState.moved) {
-                    return;
-                }
-                updateHeaderState(!headerEl.classList.contains('is-collapsed'));
-            });
-            headerEl.addEventListener('pointerdown', (event) => {
-                if (event.button !== 0) {
-                    return;
-                }
-                if (resizeState || shouldIgnorePanelDrag(event.target)) {
-                    return;
-                }
-                const rect = headerEl.getBoundingClientRect();
-                dragState = {
-                    pointerId: event.pointerId,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    originLeft: rect.left,
-                    originTop: rect.top,
-                    moved: false,
-                };
-                headerEl.classList.add('is-dragging');
-                headerEl.setPointerCapture(event.pointerId);
-            });
-            headerEl.addEventListener('pointermove', (event) => {
-                if (!dragState || dragState.pointerId !== event.pointerId) {
-                    return;
-                }
-                const dx = event.clientX - dragState.startX;
-                const dy = event.clientY - dragState.startY;
-                if (!dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
-                    dragState.moved = true;
-                }
-                if (!dragState.moved) {
-                    return;
-                }
-                event.preventDefault();
-                setHeaderPosition(dragState.originLeft + dx, dragState.originTop + dy);
-            });
-            const stopDragging = (event) => {
-                if (!dragState || dragState.pointerId !== event.pointerId) {
-                    return;
-                }
-                headerEl.classList.remove('is-dragging');
-                if (headerEl.hasPointerCapture(event.pointerId)) {
-                    headerEl.releasePointerCapture(event.pointerId);
-                }
-                const moved = dragState.moved;
-                dragState = null;
-                if (moved) {
+                headerToggle.addEventListener('click', () => {
+                    if (dragState && dragState.moved) {
+                        return;
+                    }
+                    updateHeaderState(!headerEl.classList.contains('is-collapsed'));
+                });
+                headerEl.addEventListener('pointerdown', (event) => {
+                    if (event.button !== 0) {
+                        return;
+                    }
+                    if (resizeState || shouldIgnorePanelDrag(event.target)) {
+                        return;
+                    }
+                    const rect = headerEl.getBoundingClientRect();
+                    dragState = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        originLeft: rect.left,
+                        originTop: rect.top,
+                        moved: false,
+                    };
+                    headerEl.classList.add('is-dragging');
+                    headerEl.setPointerCapture(event.pointerId);
+                });
+                headerEl.addEventListener('pointermove', (event) => {
+                    if (!dragState || dragState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    const dx = event.clientX - dragState.startX;
+                    const dy = event.clientY - dragState.startY;
+                    if (!dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                        dragState.moved = true;
+                    }
+                    if (!dragState.moved) {
+                        return;
+                    }
                     event.preventDefault();
-                }
-            };
-            headerEl.addEventListener('pointerup', stopDragging);
-            headerEl.addEventListener('pointercancel', stopDragging);
-            headerResizeHandle.addEventListener('pointerdown', (event) => {
-                if (event.button !== 0) {
-                    return;
-                }
-                if (headerEl.classList.contains('is-collapsed')) {
-                    return;
-                }
-                const rect = headerEl.getBoundingClientRect();
-                resizeState = {
-                    pointerId: event.pointerId,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    originWidth: rect.width,
-                    originHeight: rect.height,
-                    originLeft: rect.left,
-                    originTop: rect.top,
+                    setHeaderPosition(dragState.originLeft + dx, dragState.originTop + dy);
+                });
+                const stopDragging = (event) => {
+                    if (!dragState || dragState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    headerEl.classList.remove('is-dragging');
+                    if (headerEl.hasPointerCapture(event.pointerId)) {
+                        headerEl.releasePointerCapture(event.pointerId);
+                    }
+                    const moved = dragState.moved;
+                    dragState = null;
+                    if (moved) {
+                        event.preventDefault();
+                    }
                 };
-                event.preventDefault();
-                event.stopPropagation();
-                headerResizeHandle.setPointerCapture(event.pointerId);
-            });
-            headerResizeHandle.addEventListener('pointermove', (event) => {
-                if (!resizeState || resizeState.pointerId !== event.pointerId) {
-                    return;
-                }
-                const width = resizeState.originWidth + (event.clientX - resizeState.startX);
-                const height = resizeState.originHeight + (event.clientY - resizeState.startY);
-                setHeaderSize(width, height);
-            });
-            const stopResizing = (event) => {
-                if (!resizeState || resizeState.pointerId !== event.pointerId) {
-                    return;
-                }
-                if (headerResizeHandle.hasPointerCapture(event.pointerId)) {
-                    headerResizeHandle.releasePointerCapture(event.pointerId);
-                }
-                resizeState = null;
-            };
-            headerResizeHandle.addEventListener('pointerup', stopResizing);
-            headerResizeHandle.addEventListener('pointercancel', stopResizing);
-            deskPreviewPanel.addEventListener('pointerdown', (event) => {
-                if (event.button !== 0) {
-                    return;
-                }
-                if (deskState.resizeState || shouldIgnoreDeskPanelDrag(event.target)) {
-                    return;
-                }
-                const rect = deskPreviewPanel.getBoundingClientRect();
-                deskState.dragState = {
-                    pointerId: event.pointerId,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    originLeft: rect.left,
-                    originTop: rect.top,
-                    moved: false,
+                headerEl.addEventListener('pointerup', stopDragging);
+                headerEl.addEventListener('pointercancel', stopDragging);
+                headerResizeHandle.addEventListener('pointerdown', (event) => {
+                    if (event.button !== 0) {
+                        return;
+                    }
+                    if (headerEl.classList.contains('is-collapsed')) {
+                        return;
+                    }
+                    const rect = headerEl.getBoundingClientRect();
+                    resizeState = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        originWidth: rect.width,
+                        originHeight: rect.height,
+                        originLeft: rect.left,
+                        originTop: rect.top,
+                    };
+                    event.preventDefault();
+                    event.stopPropagation();
+                    headerResizeHandle.setPointerCapture(event.pointerId);
+                });
+                headerResizeHandle.addEventListener('pointermove', (event) => {
+                    if (!resizeState || resizeState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    const width = resizeState.originWidth + (event.clientX - resizeState.startX);
+                    const height = resizeState.originHeight + (event.clientY - resizeState.startY);
+                    setHeaderSize(width, height);
+                });
+                const stopResizing = (event) => {
+                    if (!resizeState || resizeState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    if (headerResizeHandle.hasPointerCapture(event.pointerId)) {
+                        headerResizeHandle.releasePointerCapture(event.pointerId);
+                    }
+                    resizeState = null;
                 };
-                deskPreviewPanel.classList.add('is-dragging');
-                deskPreviewPanel.setPointerCapture(event.pointerId);
-            });
-            deskPreviewPanel.addEventListener('pointermove', (event) => {
-                if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
-                    return;
-                }
-                const dx = event.clientX - deskState.dragState.startX;
-                const dy = event.clientY - deskState.dragState.startY;
-                if (!deskState.dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
-                    deskState.dragState.moved = true;
-                }
-                if (!deskState.dragState.moved) {
-                    return;
-                }
-                event.preventDefault();
-                setDeskPanelPosition(deskState.dragState.originLeft + dx, deskState.dragState.originTop + dy);
-                drawDeskPreview();
-            });
-            const stopDeskPanelDragging = (event) => {
-                if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
-                    return;
-                }
-                deskPreviewPanel.classList.remove('is-dragging');
-                if (deskPreviewPanel.hasPointerCapture(event.pointerId)) {
-                    deskPreviewPanel.releasePointerCapture(event.pointerId);
-                }
-                deskState.dragState = null;
-            };
-            deskPreviewPanel.addEventListener('pointerup', stopDeskPanelDragging);
-            deskPreviewPanel.addEventListener('pointercancel', stopDeskPanelDragging);
-            deskPreviewResize.addEventListener('pointerdown', (event) => {
-                if (event.button !== 0) {
-                    return;
-                }
-                const rect = deskPreviewPanel.getBoundingClientRect();
-                deskState.resizeState = {
-                    pointerId: event.pointerId,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    originWidth: rect.width,
-                    originLeft: rect.left,
-                    originTop: rect.top,
+                headerResizeHandle.addEventListener('pointerup', stopResizing);
+                headerResizeHandle.addEventListener('pointercancel', stopResizing);
+                deskPreviewPanel.addEventListener('pointerdown', (event) => {
+                    if (event.button !== 0) {
+                        return;
+                    }
+                    if (deskState.resizeState || shouldIgnoreDeskPanelDrag(event.target)) {
+                        return;
+                    }
+                    const rect = deskPreviewPanel.getBoundingClientRect();
+                    deskState.dragState = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        originLeft: rect.left,
+                        originTop: rect.top,
+                        moved: false,
+                    };
+                    deskPreviewPanel.classList.add('is-dragging');
+                    deskPreviewPanel.setPointerCapture(event.pointerId);
+                });
+                deskPreviewPanel.addEventListener('pointermove', (event) => {
+                    if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    const dx = event.clientX - deskState.dragState.startX;
+                    const dy = event.clientY - deskState.dragState.startY;
+                    if (!deskState.dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                        deskState.dragState.moved = true;
+                    }
+                    if (!deskState.dragState.moved) {
+                        return;
+                    }
+                    event.preventDefault();
+                    setDeskPanelPosition(deskState.dragState.originLeft + dx, deskState.dragState.originTop + dy);
+                    drawDeskPreview();
+                });
+                const stopDeskPanelDragging = (event) => {
+                    if (!deskState.dragState || deskState.dragState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    deskPreviewPanel.classList.remove('is-dragging');
+                    if (deskPreviewPanel.hasPointerCapture(event.pointerId)) {
+                        deskPreviewPanel.releasePointerCapture(event.pointerId);
+                    }
+                    deskState.dragState = null;
                 };
-                event.preventDefault();
-                event.stopPropagation();
-                deskPreviewResize.setPointerCapture(event.pointerId);
-            });
-            deskPreviewResize.addEventListener('pointermove', (event) => {
-                if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
-                    return;
-                }
-                const width = deskState.resizeState.originWidth + (event.clientX - deskState.resizeState.startX);
-                setDeskPanelSize(width);
-                drawDeskPreview();
-            });
-            const stopDeskPanelResizing = (event) => {
-                if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
-                    return;
-                }
-                if (deskPreviewResize.hasPointerCapture(event.pointerId)) {
-                    deskPreviewResize.releasePointerCapture(event.pointerId);
-                }
-                deskState.resizeState = null;
-            };
-            deskPreviewResize.addEventListener('pointerup', stopDeskPanelResizing);
-            deskPreviewResize.addEventListener('pointercancel', stopDeskPanelResizing);
+                deskPreviewPanel.addEventListener('pointerup', stopDeskPanelDragging);
+                deskPreviewPanel.addEventListener('pointercancel', stopDeskPanelDragging);
+                deskPreviewResize.addEventListener('pointerdown', (event) => {
+                    if (event.button !== 0) {
+                        return;
+                    }
+                    const rect = deskPreviewPanel.getBoundingClientRect();
+                    deskState.resizeState = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        originWidth: rect.width,
+                        originLeft: rect.left,
+                        originTop: rect.top,
+                    };
+                    event.preventDefault();
+                    event.stopPropagation();
+                    deskPreviewResize.setPointerCapture(event.pointerId);
+                });
+                deskPreviewResize.addEventListener('pointermove', (event) => {
+                    if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    const width = deskState.resizeState.originWidth + (event.clientX - deskState.resizeState.startX);
+                    setDeskPanelSize(width);
+                    drawDeskPreview();
+                });
+                const stopDeskPanelResizing = (event) => {
+                    if (!deskState.resizeState || deskState.resizeState.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    if (deskPreviewResize.hasPointerCapture(event.pointerId)) {
+                        deskPreviewResize.releasePointerCapture(event.pointerId);
+                    }
+                    deskState.resizeState = null;
+                };
+                deskPreviewResize.addEventListener('pointerup', stopDeskPanelResizing);
+                deskPreviewResize.addEventListener('pointercancel', stopDeskPanelResizing);
+            }
             window.addEventListener('resize', () => {
                 const rect = headerEl.getBoundingClientRect();
                 const size = clampHeaderSize(rect.width, rect.height, rect.left, rect.top);
@@ -3179,23 +3793,59 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             });
             const setUrlState = (name, quality) => {
                 const url = new URL(location.href);
-                const parts = url.pathname.split('/');
-                parts[parts.length - 1] = encodeURIComponent(name);
-                url.pathname = parts.join('/');
+                url.pathname = isDeskViewOnly ? `/deskview/${encodeURIComponent(name)}` : `/streams/${encodeURIComponent(name)}`;
                 if (quality) {
-                    url.searchParams.set('quality', quality);
+                    url.search = `?quality=${encodeURIComponent(quality)}`;
                 } else {
-                    url.searchParams.delete('quality');
+                    url.search = '';
                 }
-                if (effectState.enabled) {
-                    url.searchParams.set('distort', '1');
-                } else {
-                    url.searchParams.delete('distort');
-                }
-                url.searchParams.set('fx', effectState.fx.toFixed(2));
-                url.searchParams.set('fy', effectState.fy.toFixed(2));
-                url.searchParams.set('scale', effectState.scale.toFixed(2));
                 history.replaceState(null, '', url);
+                updateDeskViewLink();
+            };
+            const openDeskViewWindow = (name, quality) => {
+                const url = new URL(location.href);
+                url.pathname = `/deskview/${encodeURIComponent(name)}`;
+                if (quality) {
+                    url.search = `?quality=${encodeURIComponent(quality)}`;
+                } else {
+                    url.search = '';
+                }
+                url.hash = new URLSearchParams({ [deskViewSyncParam]: deskViewSyncId }).toString();
+                return url.toString();
+            };
+            const applyDeskViewSyncState = async (payload) => {
+                if (!payload || typeof payload !== 'object') {
+                    return;
+                }
+                const nextName = typeof payload.name === 'string' && payload.name ? payload.name : activeName;
+                const nextQuality = typeof payload.quality === 'string' ? payload.quality : '';
+                setEffectEnabled(Boolean(payload.distort));
+                setGridOverlayEnabled(Boolean(payload.gridEnabled));
+                fisheyeGridEnabled.checked = Boolean(payload.gridEnabled);
+                setDeskViewEnabled(payload.deskEnabled !== false);
+                fisheyeFx.value = String(clampEffectValue(payload.fx, -0.25, 0.25, effectDefaults.fx));
+                fisheyeFy.value = String(clampEffectValue(payload.fy, -0.25, 0.25, effectDefaults.fy));
+                fisheyeScale.value = String(clampEffectValue(payload.scale, 0.5, 3, effectDefaults.scale));
+                const nextDeskPoints = parseDeskPoints(payload.desk);
+                if (nextDeskPoints) {
+                    deskState.points = cloneDeskPoints(nextDeskPoints);
+                    persistDeskPoints();
+                }
+                const nextDeskGuides = parseDeskGuides(payload.guides, defaultDeskGuides(deskState.points));
+                if (nextDeskGuides) {
+                    deskState.guides = cloneDeskGuides(nextDeskGuides, defaultDeskGuides(deskState.points));
+                    persistDeskGuides();
+                }
+                syncEffectState();
+                syncDeskOverlay();
+                drawDeskPreview();
+                if (nextName !== activeName || nextQuality !== activeQuality) {
+                    pendingName = nextName;
+                    pendingQuality = nextQuality;
+                    await swapStream(nextName, nextQuality);
+                    return;
+                }
+                setUrlState(nextName, nextQuality);
             };
             const swapStream = async (nextName, nextQuality) => {
                 swapToken++;
@@ -3242,6 +3892,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     qualitySelect.disabled = false;
                     qualitySelect.value = activeQuality;
                     setUrlState(activeName, activeQuality);
+                    sendDeskViewSync();
                     loadCapabilities(activeName);
                     setTimeout(() => oldPlayer.close(), 120);
                 });
@@ -3349,9 +4000,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 setDeskViewEnabled(deskViewEnabled.checked);
                 syncDeskOverlay();
                 drawDeskPreview();
+                sendDeskViewSync();
             });
             deskPreviewFullscreen.addEventListener('click', () => {
                 toggleViewerFullscreen();
+            });
+            const updateDeskViewLink = () => {
+                deskPreviewOpen.href = openDeskViewWindow(pendingName || activeName, pendingQuality || activeQuality);
+            };
+            deskPreviewOpen.addEventListener('click', () => {
+                updateDeskViewLink();
+            });
+            deskViewAuto.addEventListener('click', () => {
+                autoDetectDeskView();
             });
             deskViewReset.addEventListener('click', () => {
                 resetDeskView();
@@ -3360,6 +4021,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             fisheyeGridEnabled.addEventListener('change', () => {
                 setGridOverlayEnabled(fisheyeGridEnabled.checked);
                 drawGridOverlay();
+                sendDeskViewSync();
             });
             fisheyeFx.addEventListener('input', syncEffectState);
             fisheyeFy.addEventListener('input', syncEffectState);
@@ -3402,6 +4064,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             syncEffectState();
             syncDeskOverlay();
             drawDeskPreview();
+            updateDeskViewLink();
             document.addEventListener('fullscreenchange', () => {
                 const isFullscreen = document.fullscreenElement === viewerEl;
                 deskPreviewFullscreen.textContent = isFullscreen ? 'Exit Fullscreen' : 'Fullscreen';
@@ -3410,8 +4073,37 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             });
 
             let infoWs = null;
+            let deskViewWs = null;
             let reconnectTimer = null;
             let reconnectDelay = 1000;
+            let deskViewReconnectTimer = null;
+            let deskViewReconnectDelay = 1000;
+            let calibrationSyncTimer = null;
+            const sendServerCalibrationSync = () => {
+                const streamName = pendingName || activeName;
+                if (!streamName) {
+                    return;
+                }
+                const payload = buildDeskViewSyncPayload();
+                const query = payload.quality ? `?quality=${encodeURIComponent(payload.quality)}` : '';
+                fetch(`/api/streams/${encodeURIComponent(streamName)}/calibration${query}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                }).catch(() => { });
+            };
+            const scheduleServerCalibrationSync = () => {
+                clearTimeout(calibrationSyncTimer);
+                calibrationSyncTimer = setTimeout(sendServerCalibrationSync, 150);
+            };
+            const sendDeskViewSync = () => {
+                if (isDeskViewOnly || !deskViewWs || deskViewWs.readyState !== WebSocket.OPEN) {
+                    scheduleServerCalibrationSync();
+                    return;
+                }
+                deskViewWs.send(JSON.stringify(buildDeskViewSyncPayload()));
+                scheduleServerCalibrationSync();
+            };
             const connectInfoSocket = () => {
                 infoWs = new WebSocket(`${protocol}://${location.host}/ws/info`);
                 infoWs.onopen = () => {
@@ -3454,17 +4146,51 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     }
                 };
             };
+            const connectDeskViewSocket = () => {
+                deskViewWs = new WebSocket(`${protocol}://${location.host}/ws/deskview?sync=${encodeURIComponent(deskViewSyncId)}`);
+                deskViewWs.onopen = () => {
+                    deskViewReconnectDelay = 1000;
+                    if (!isDeskViewOnly) {
+                        sendDeskViewSync();
+                    }
+                };
+                deskViewWs.onmessage = async (event) => {
+                    if (!isDeskViewOnly) {
+                        return;
+                    }
+                    try {
+                        const payload = JSON.parse(event.data);
+                        await applyDeskViewSyncState(payload);
+                    } catch (_) { }
+                };
+                deskViewWs.onclose = () => {
+                    clearTimeout(deskViewReconnectTimer);
+                    deskViewReconnectTimer = setTimeout(connectDeskViewSocket, deskViewReconnectDelay);
+                    deskViewReconnectDelay = Math.min(deskViewReconnectDelay * 2, 5000);
+                };
+                deskViewWs.onerror = () => {
+                    if (deskViewWs && (deskViewWs.readyState === WebSocket.OPEN || deskViewWs.readyState === WebSocket.CONNECTING)) {
+                        deskViewWs.close();
+                    }
+                };
+            };
             connectInfoSocket();
+            connectDeskViewSocket();
             window.addEventListener('beforeunload', () => {
                 clearTimeout(pendingSwapTimer);
                 clearTimeout(effectQueryUpdateTimer);
+                clearTimeout(calibrationSyncTimer);
                 clearTimeout(reconnectTimer);
+                clearTimeout(deskViewReconnectTimer);
                 if (deskState.stage) {
                     deskState.stage.destroy();
                     deskState.stage = null;
                 }
                 if (infoWs && (infoWs.readyState === WebSocket.OPEN || infoWs.readyState === WebSocket.CONNECTING)) {
                     infoWs.close();
+                }
+                if (deskViewWs && (deskViewWs.readyState === WebSocket.OPEN || deskViewWs.readyState === WebSocket.CONNECTING)) {
+                    deskViewWs.close();
                 }
             }, { once: true });
         }

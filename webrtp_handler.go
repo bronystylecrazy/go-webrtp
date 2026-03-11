@@ -13,12 +13,16 @@ func (r *Instance) Handler() fiber.Handler {
 			return fiber.ErrUpgradeRequired
 		}
 		return websocket.New(func(conn *websocket.Conn) {
-			r.HandleWebsocket(conn)
+			r.handleHubWebsocket(conn, r.hub)
 		})(c)
 	}
 }
 
 func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
+	r.handleHubWebsocket(conn, r.hub)
+}
+
+func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 	defer conn.Close()
 	r.logger.Printf("client connected: %s", conn.RemoteAddr())
 
@@ -33,19 +37,19 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 		}
 	}()
 
-	initData := r.hub.GetInit()
+	initData := hub.GetInit()
 	for initData == nil {
 		r.logger.Printf("stream not ready, waiting %s", conn.RemoteAddr())
 		select {
 		case <-time.After(100 * time.Millisecond):
-			initData = r.hub.GetInit()
+			initData = hub.GetInit()
 		case <-done:
 			r.logger.Printf("client disconnected while waiting: %s", conn.RemoteAddr())
 			return
 		}
 	}
 
-	initData, startupFrames, ch := r.hub.SubscribeWithStartupSnapshot()
+	initData, startupFrames, ch := hub.SubscribeWithStartupSnapshot()
 	var startupFrameNo uint64
 	for _, startupFrame := range startupFrames {
 		if startupFrame != nil && startupFrame.FrameNo > startupFrameNo {
@@ -55,7 +59,7 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteMessage(websocket.BinaryMessage, initData); err != nil {
-		r.hub.Unsubscribe(ch)
+		hub.Unsubscribe(ch)
 		return
 	}
 	for _, startupFrame := range startupFrames {
@@ -64,12 +68,12 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
 		if err := conn.WriteMessage(websocket.BinaryMessage, startupFrame.Data); err != nil {
-			r.hub.Unsubscribe(ch)
+			hub.Unsubscribe(ch)
 			return
 		}
 	}
 	defer func() {
-		r.hub.Unsubscribe(ch)
+		hub.Unsubscribe(ch)
 		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 	}()
 

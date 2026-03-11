@@ -41,6 +41,18 @@ client.on_raw(lambda frame_no, data, is_key: print(f"Frame: {frame_no}, size: {l
 client.start()
 ```
 
+### MQTT Keyframe Viewer
+
+When `keyframeSink` includes `mqtt`, the broker receives raw `jpg`/`png`
+payloads on the configured topic. View them with:
+
+```bash
+cd client/python
+uv run python main_mqtt_keyframe.py \
+  --broker mqtt://localhost:1883 \
+  --topic webrtp/demoLoop2/keyframe
+```
+
 ## API
 
 ### WebRtpClient

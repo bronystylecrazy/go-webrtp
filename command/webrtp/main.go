@@ -53,19 +53,26 @@ type Config struct {
 }
 
 type Upstream struct {
-	Name        *string      `yaml:"name"`
-	SourceType  *string      `yaml:"sourceType"`
-	RtspUrl     string       `yaml:"rtspUrl"`
-	Device      string       `yaml:"device"`
-	Path        string       `yaml:"path"`
-	Codec       string       `yaml:"codec"`
-	Width       *int         `yaml:"width"`
-	Height      *int         `yaml:"height"`
-	FrameRate   *float64     `yaml:"frameRate"`
-	BitrateKbps *int         `yaml:"bitrateKbps"`
-	Enabled     *bool        `yaml:"enabled"`
-	OnDemand    bool         `yaml:"onDemand"`
-	Renditions  []*Rendition `yaml:"renditions"`
+	Name              *string      `yaml:"name"`
+	SourceType        *string      `yaml:"sourceType"`
+	RtspUrl           string       `yaml:"rtspUrl"`
+	Device            string       `yaml:"device"`
+	Path              string       `yaml:"path"`
+	Codec             string       `yaml:"codec"`
+	Width             *int         `yaml:"width"`
+	Height            *int         `yaml:"height"`
+	FrameRate         *float64     `yaml:"frameRate"`
+	BitrateKbps       *int         `yaml:"bitrateKbps"`
+	ServeStream       *bool        `yaml:"serveStream,omitempty"`
+	CalibrationFrom   string       `yaml:"calibrationFrom,omitempty"`
+	KeyframeSink      string       `yaml:"keyframeSink"`
+	KeyframeOutput    string       `yaml:"keyframeOutput"`
+	KeyframeFormat    string       `yaml:"keyframeFormat"`
+	KeyframeMqttURL   string       `yaml:"keyframeMqttUrl,omitempty"`
+	KeyframeMqttTopic string       `yaml:"keyframeMqttTopic,omitempty"`
+	Enabled           *bool        `yaml:"enabled"`
+	OnDemand          bool         `yaml:"onDemand"`
+	Renditions        []*Rendition `yaml:"renditions"`
 }
 
 type Rendition struct {
@@ -356,7 +363,7 @@ func (s *Stream) MaybeScheduleStop(idle time.Duration) {
 	if s.HasActiveRecording() {
 		return
 	}
-	if s.Hub.GetStats(s.Name).ClientCount > 0 {
+	if s.activeClientCount() > 0 {
 		return
 	}
 	s.stopTimerMu.Lock()
@@ -365,7 +372,7 @@ func (s *Stream) MaybeScheduleStop(idle time.Duration) {
 		s.stopTimer.Stop()
 	}
 	s.stopTimer = time.AfterFunc(idle, func() {
-		if s.Hub.GetStats(s.Name).ClientCount > 0 {
+		if s.activeClientCount() > 0 {
 			return
 		}
 		if s.HasActiveRecording() {
@@ -373,6 +380,10 @@ func (s *Stream) MaybeScheduleStop(idle time.Duration) {
 		}
 		_ = s.StopNow()
 	})
+}
+
+func (s *Stream) activeClientCount() int32 {
+	return s.Hub.GetStats(s.Name).ClientCount
 }
 
 func sanitizeRecordingName(name string) string {
@@ -466,6 +477,7 @@ func main() {
 	// Create single fiber instance
 	app := fiber.New()
 	app.Use(cors.New())
+	deskViewBroker := NewDeskViewSocketBroker()
 
 	// Register routes
 	app.All("/stream/no/:index<int>", func(c fiber.Ctx) error {
@@ -507,6 +519,7 @@ func main() {
 	})
 	app.All("/ws/info", StatusSocketHandler(manager))
 	app.All("/ws/dashboard", DashboardSocketHandler(manager))
+	app.All("/ws/deskview", DeskViewSocketHandler(deskViewBroker))
 	app.Post("/api/streams", func(c fiber.Ctx) error {
 		req := &StreamApiRequest{}
 		if err := c.Bind().Body(req); err != nil {
@@ -549,6 +562,22 @@ func main() {
 		}
 		return c.JSON(item)
 	})
+	app.Post("/api/streams/:name/calibration", func(c fiber.Ctx) error {
+		targets := manager.CalibrationTargets(c.Params("name"), c.Query("quality"))
+		if len(targets) == 0 {
+			return fiber.ErrNotFound
+		}
+		req := &DeskViewSyncMessage{}
+		if err := c.Bind().Body(req); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		for _, stream := range targets {
+			if err := stream.Inst.UpdateKeyframeCalibration(req.FX, req.FY, req.Scale, req.Desk); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+		}
+		return c.SendStatus(fiber.StatusNoContent)
+	})
 	app.Put("/api/streams/:name", func(c fiber.Ctx) error {
 		req := &StreamApiRequest{}
 		if err := c.Bind().Body(req); err != nil {
@@ -573,7 +602,7 @@ func main() {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 	app.Post("/api/streams/:name/record/start", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -594,7 +623,7 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(recordingResponse(stream))
 	})
 	app.Post("/api/streams/:name/record/stop", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -605,7 +634,7 @@ func main() {
 		return c.JSON(recordingResponse(stream))
 	})
 	app.Get("/api/streams/:name/record/status", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -616,6 +645,12 @@ func main() {
 		return c.Type("html").Send(indexHtml)
 	})
 	app.Get("/streams/:name", func(c fiber.Ctx) error {
+		if _, ok := manager.StreamByName(c.Params("name")); !ok {
+			return fiber.ErrNotFound
+		}
+		return c.Type("html").Send(streamHtml)
+	})
+	app.Get("/deskview/:name", func(c fiber.Ctx) error {
 		if _, ok := manager.StreamByName(c.Params("name")); !ok {
 			return fiber.ErrNotFound
 		}
@@ -709,6 +744,30 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 		if len(*w.logs) > 100 {
 			*w.logs = (*w.logs)[len(*w.logs)-100:]
 		}
+		if shouldMirrorLogLine(msg) {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
 	}
 	return len(p), nil
+}
+
+func shouldMirrorLogLine(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return false
+	}
+	for _, needle := range []string{
+		" error",
+		"error:",
+		"failed",
+		"fatal",
+		"panic",
+		"unavailable",
+		"timed out",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }

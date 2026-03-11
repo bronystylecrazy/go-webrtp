@@ -23,3 +23,5 @@ zzz.go
 recordings
 *.h264
 *.mkv
+go
+client/python/__pycache__

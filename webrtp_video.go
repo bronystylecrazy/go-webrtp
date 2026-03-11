@@ -14,6 +14,13 @@ type videoHandler struct {
 	seqNr    uint32
 	prevTS   uint32
 	tsOff    uint64
+	width    int
+	height   int
+	h264SPS  []byte
+	h264PPS  []byte
+	h265VPS  []byte
+	h265SPS  []byte
+	h265PPS  []byte
 	mu       sync.Mutex
 }
 
@@ -69,6 +76,12 @@ func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []by
 			inPPS = nalu
 		}
 	}
+	if len(inSPS) > 0 {
+		r.h264SPS = append([]byte(nil), inSPS...)
+	}
+	if len(inPPS) > 0 {
+		r.h264PPS = append([]byte(nil), inPPS...)
+	}
 	if r.hub.GetInit() == nil {
 		sps := spsBase
 		pps := ppsBase
@@ -99,7 +112,22 @@ func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []by
 		}
 
 		r.hub.SetInfo("H264", width, height, 0)
+		r.width = width
+		r.height = height
 		r.logger.Printf("H264 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
+	}
+	if isIDR && r.instance != nil && r.instance.keyframes != nil {
+		exportAU := make([][]byte, 0, len(au)+2)
+		if len(r.h264SPS) > 0 {
+			exportAU = append(exportAU, append([]byte(nil), r.h264SPS...))
+		}
+		if len(r.h264PPS) > 0 {
+			exportAU = append(exportAU, append([]byte(nil), r.h264PPS...))
+		}
+		for _, nalu := range au {
+			exportAU = append(exportAU, append([]byte(nil), nalu...))
+		}
+		r.instance.keyframes.Enqueue("h264", r.width, r.height, exportAU, r.seqNr+1)
 	}
 	r.processAu(au, ts, isIDR)
 }
@@ -122,6 +150,15 @@ func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, pps
 		if t := (nalu[0] >> 1) & 0x3F; t >= 16 && t <= 23 {
 			isIDR = true
 		}
+	}
+	if len(inVPS) > 0 {
+		r.h265VPS = append([]byte(nil), inVPS...)
+	}
+	if len(inSPS) > 0 {
+		r.h265SPS = append([]byte(nil), inSPS...)
+	}
+	if len(inPPS) > 0 {
+		r.h265PPS = append([]byte(nil), inPPS...)
 	}
 	if r.hub.GetInit() == nil {
 		vps := vpsBase
@@ -157,7 +194,25 @@ func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, pps
 		}
 
 		r.hub.SetInfo("H265", width, height, 0)
+		r.width = width
+		r.height = height
 		r.logger.Printf("H265 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
+	}
+	if isIDR && r.instance != nil && r.instance.keyframes != nil {
+		exportAU := make([][]byte, 0, len(au)+3)
+		if len(r.h265VPS) > 0 {
+			exportAU = append(exportAU, append([]byte(nil), r.h265VPS...))
+		}
+		if len(r.h265SPS) > 0 {
+			exportAU = append(exportAU, append([]byte(nil), r.h265SPS...))
+		}
+		if len(r.h265PPS) > 0 {
+			exportAU = append(exportAU, append([]byte(nil), r.h265PPS...))
+		}
+		for _, nalu := range au {
+			exportAU = append(exportAU, append([]byte(nil), nalu...))
+		}
+		r.instance.keyframes.Enqueue("h265", r.width, r.height, exportAU, r.seqNr+1)
 	}
 	r.processAu(au, ts, isIDR)
 }

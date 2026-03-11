@@ -17,19 +17,25 @@ type Logger interface {
 }
 
 type Config struct {
-	SourceType      string
-	Rtsp            string
-	Device          string
-	Path            string
-	Codec           string
-	Width           int
-	Height          int
-	FrameRate       float64
-	BitrateKbps     int
-	Logger          Logger
-	WriteTimeout    time.Duration
-	ReadBufferSize  int
-	WriteBufferSize int
+	SourceType        string
+	StreamName        string
+	Rtsp              string
+	Device            string
+	Path              string
+	Codec             string
+	Width             int
+	Height            int
+	FrameRate         float64
+	BitrateKbps       int
+	KeyframeSink      string
+	KeyframeOutput    string
+	KeyframeFormat    string
+	KeyframeMqttURL   string
+	KeyframeMqttTopic string
+	Logger            Logger
+	WriteTimeout      time.Duration
+	ReadBufferSize    int
+	WriteBufferSize   int
 }
 
 type Instance struct {
@@ -42,6 +48,7 @@ type Instance struct {
 
 	recorderMu sync.Mutex
 	recorder   *Recorder
+	keyframes  *keyframeSink
 }
 
 type stdLogger struct{}
@@ -70,26 +77,36 @@ func Init(cfg *Config) *Instance {
 	if sourceType == "" {
 		sourceType = "rtsp"
 	}
-	return &Instance{
+	inst := &Instance{
 		cfg: &Config{
-			SourceType:      sourceType,
-			Rtsp:            cfg.Rtsp,
-			Device:          cfg.Device,
-			Path:            cfg.Path,
-			Codec:           strings.ToLower(strings.TrimSpace(cfg.Codec)),
-			Width:           cfg.Width,
-			Height:          cfg.Height,
-			FrameRate:       cfg.FrameRate,
-			BitrateKbps:     cfg.BitrateKbps,
-			Logger:          logger,
-			WriteTimeout:    writeTimeout,
-			ReadBufferSize:  readBuf,
-			WriteBufferSize: writeBuf,
+			SourceType:        sourceType,
+			StreamName:        strings.TrimSpace(cfg.StreamName),
+			Rtsp:              cfg.Rtsp,
+			Device:            cfg.Device,
+			Path:              cfg.Path,
+			Codec:             strings.ToLower(strings.TrimSpace(cfg.Codec)),
+			Width:             cfg.Width,
+			Height:            cfg.Height,
+			FrameRate:         cfg.FrameRate,
+			BitrateKbps:       cfg.BitrateKbps,
+			KeyframeSink:      strings.ToLower(strings.TrimSpace(cfg.KeyframeSink)),
+			KeyframeOutput:    strings.TrimSpace(cfg.KeyframeOutput),
+			KeyframeFormat:    strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat)),
+			KeyframeMqttURL:   strings.TrimSpace(cfg.KeyframeMqttURL),
+			KeyframeMqttTopic: strings.TrimSpace(cfg.KeyframeMqttTopic),
+			Logger:            logger,
+			WriteTimeout:      writeTimeout,
+			ReadBufferSize:    readBuf,
+			WriteBufferSize:   writeBuf,
 		},
 		hub:      NewHub(),
 		logger:   logger,
 		recorder: NewRecorder(logger),
 	}
+	if inst.cfg.KeyframeSink != "" {
+		inst.keyframes = newKeyframeSink(inst.cfg, logger)
+	}
+	return inst
 }
 
 func (r *Instance) InstanceReady() bool {
@@ -168,7 +185,17 @@ func (r *Instance) RecordingStatus() RecordingStatus {
 }
 
 func (r *Instance) currentRecorder() *Recorder {
+	if r == nil {
+		return nil
+	}
 	r.recorderMu.Lock()
 	defer r.recorderMu.Unlock()
 	return r.recorder
+}
+
+func (r *Instance) UpdateKeyframeCalibration(fx, fy, scale float64, desk string) error {
+	if r == nil || r.keyframes == nil {
+		return nil
+	}
+	return r.keyframes.UpdateCalibration(fx, fy, scale, desk)
 }
