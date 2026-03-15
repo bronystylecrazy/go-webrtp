@@ -456,6 +456,173 @@
             display: block;
         }
 
+        .bbox-overlay {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+            z-index: 3;
+        }
+
+        .bbox-item {
+            position: absolute;
+            border: 2px solid rgba(248, 250, 252, 0.92);
+            background: rgba(14, 165, 233, 0.12);
+            box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.6);
+            pointer-events: auto;
+            touch-action: none;
+            cursor: move;
+            min-width: 18px;
+            min-height: 18px;
+        }
+
+        .bbox-item.is-active {
+            border-color: #fbbf24;
+            background: rgba(251, 191, 36, 0.18);
+        }
+
+        .bbox-label {
+            position: absolute;
+            left: 6px;
+            top: 6px;
+            padding: 2px 6px;
+            border-radius: 999px;
+            background: rgba(2, 6, 23, 0.8);
+            color: #f8fafc;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            pointer-events: none;
+        }
+
+        .bbox-resize {
+            position: absolute;
+            right: -7px;
+            bottom: -7px;
+            width: 14px;
+            height: 14px;
+            border-radius: 999px;
+            background: #f8fafc;
+            border: 2px solid #0f172a;
+            box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.4);
+            cursor: nwse-resize;
+        }
+
+        .bbox-panel {
+            position: absolute;
+            left: 16px;
+            top: 16px;
+            z-index: 4;
+            width: min(360px, calc(100vw - 32px));
+            max-height: calc(100% - 32px);
+            overflow: auto;
+            padding: 12px;
+            border: 1px solid rgba(125, 211, 252, 0.24);
+            border-radius: 18px;
+            background:
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 36%),
+                linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(2, 6, 23, 0.92));
+            box-shadow: 0 18px 48px rgba(2, 6, 23, 0.42);
+            backdrop-filter: blur(18px);
+        }
+
+        .bbox-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .bbox-panel-title {
+            margin: 0;
+            color: #d6e8ff;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }
+
+        .bbox-panel-add {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.78);
+            color: var(--text);
+            padding: 7px 10px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .bbox-table-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .bbox-field {
+            display: grid;
+            gap: 5px;
+        }
+
+        .bbox-field span {
+            color: var(--muted);
+            font-size: 0.72rem;
+        }
+
+        .bbox-field input,
+        .bbox-field select {
+            width: 100%;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.72);
+            color: var(--text);
+            padding: 7px 9px;
+            font: inherit;
+        }
+
+        .bbox-list {
+            display: grid;
+            gap: 10px;
+        }
+
+        .bbox-card {
+            display: grid;
+            gap: 8px;
+            padding: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 14px;
+            background: rgba(2, 6, 23, 0.5);
+        }
+
+        .bbox-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .bbox-card-title {
+            color: #f8fafc;
+            font-weight: 700;
+            font-size: 0.82rem;
+        }
+
+        .bbox-card-remove {
+            border: 1px solid rgba(248, 113, 113, 0.38);
+            border-radius: 999px;
+            background: rgba(127, 29, 29, 0.22);
+            color: #fecaca;
+            padding: 4px 8px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .bbox-card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
         .desk-preview-note {
             margin: 10px 2px 0;
             color: var(--muted);
@@ -519,6 +686,14 @@
             border: 0;
             border-radius: 0;
             background: #000;
+        }
+
+        body.deskview-only .bbox-panel {
+            left: auto;
+            right: 16px;
+            top: 16px;
+            width: min(380px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
         }
 
 
@@ -937,9 +1112,27 @@
                 </div>
                 <div class="desk-preview-surface">
                     <canvas id="desk-preview-canvas" class="desk-preview-canvas"></canvas>
+                    <div id="bbox-overlay" class="bbox-overlay"></div>
                 </div>
                 <p class="desk-preview-note">Use the four corners plus the AB and CD edge points to flatten a curved
                     desk into the cleanest preview.</p>
+                <section id="bbox-panel" class="bbox-panel">
+                    <div class="bbox-panel-header">
+                        <h3 class="bbox-panel-title">BBox MQTT</h3>
+                        <button id="bbox-add" class="bbox-panel-add" type="button">Add Box</button>
+                    </div>
+                    <div class="bbox-table-grid">
+                        <label class="bbox-field">
+                            <span>Table Width (mm)</span>
+                            <input id="bbox-table-width" type="number" min="0" step="0.1" value="0">
+                        </label>
+                        <label class="bbox-field">
+                            <span>Table Height (mm)</span>
+                            <input id="bbox-table-height" type="number" min="0" step="0.1" value="0">
+                        </label>
+                    </div>
+                    <div id="bbox-list" class="bbox-list"></div>
+                </section>
                 <div id="desk-preview-resize" class="desk-preview-resize" aria-hidden="true"></div>
             </section>
         </section>
@@ -1842,6 +2035,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             }
 
             makeDecoder(codec, description) {
+                if (typeof VideoDecoder === 'undefined') {
+                    const reason = window.isSecureContext
+                        ? 'WebCodecs VideoDecoder is not available in this browser.'
+                        : 'WebCodecs VideoDecoder requires a secure context. Open this page via https:// or http://localhost.';
+                    console.error(reason);
+                    throw new Error(reason);
+                }
                 if (this.decoder && this.decoder.state !== 'closed') {
                     try { this.decoder.close(); } catch (_) { }
                 }
@@ -2422,6 +2622,55 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             return parsed.every(Boolean) ? parsed : null;
         }
 
+        function cloneBBoxItems(items) {
+            if (!Array.isArray(items)) {
+                return [];
+            }
+            return items.map((item) => ({
+                id: Number(item?.id || 0),
+                tableId: Number(item?.tableId || 1),
+                colorKey: item?.colorKey ?? null,
+                directionKey: item?.directionKey ?? null,
+                x1: clamp01(Number(item?.x1 || 0)),
+                y1: clamp01(Number(item?.y1 || 0)),
+                x2: clamp01(Number(item?.x2 || 0)),
+                y2: clamp01(Number(item?.y2 || 0)),
+                wireColorKey: item?.wireColorKey ?? null,
+            }));
+        }
+
+        function normalizeBBoxItem(item, fallbackID = 1) {
+            const x1 = clamp01(Math.min(Number(item?.x1 || 0), Number(item?.x2 || 0)));
+            const y1 = clamp01(Math.min(Number(item?.y1 || 0), Number(item?.y2 || 0)));
+            const x2 = clamp01(Math.max(Number(item?.x1 || 0), Number(item?.x2 || 0)));
+            const y2 = clamp01(Math.max(Number(item?.y1 || 0), Number(item?.y2 || 0)));
+            return {
+                id: Math.max(1, Math.round(Number(item?.id || fallbackID))),
+                tableId: Math.max(1, Math.round(Number(item?.tableId || 1))),
+                colorKey: item?.colorKey ? String(item.colorKey).toUpperCase() : null,
+                directionKey: item?.directionKey ? String(item.directionKey).toUpperCase() : null,
+                x1,
+                y1,
+                x2,
+                y2,
+                wireColorKey: item?.wireColorKey ? String(item.wireColorKey).toUpperCase() : null,
+            };
+        }
+
+        function defaultBBoxItem(id = 1) {
+            return {
+                id,
+                tableId: 1,
+                colorKey: null,
+                directionKey: null,
+                x1: 0.2,
+                y1: 0.2,
+                x2: 0.4,
+                y2: 0.4,
+                wireColorKey: null,
+            };
+        }
+
         async function main() {
             const initialParams = new URLSearchParams(location.search);
             const isDeskViewOnly = location.pathname.startsWith('/deskview/');
@@ -2465,6 +2714,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const deskPreviewMeta = document.getElementById('desk-preview-meta');
             const deskPreviewOpen = document.getElementById('desk-preview-open');
             const deskPreviewFullscreen = document.getElementById('desk-preview-fullscreen');
+            const bboxOverlay = document.getElementById('bbox-overlay');
+            const bboxPanel = document.getElementById('bbox-panel');
+            const bboxAdd = document.getElementById('bbox-add');
+            const bboxList = document.getElementById('bbox-list');
+            const bboxTableWidth = document.getElementById('bbox-table-width');
+            const bboxTableHeight = document.getElementById('bbox-table-height');
             let lastStatusMessage = { streams: [] };
             const capabilityCache = new Map();
             let pendingModeIndex = null;
@@ -2474,6 +2729,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const deskStorageKey = 'webrtp:desk-view-points';
             const deskGuideStorageKey = 'webrtp:desk-guide-points';
             const deskPanelStorageKey = 'webrtp:desk-view-panel-layout';
+            const bboxStorageKey = 'webrtp:desk-bboxs';
+            const bboxTableStorageKey = 'webrtp:desk-bbox-table';
             const effectDefaults = {
                 enabled: false,
                 fx: 0,
@@ -2501,7 +2758,20 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 previewRenderer: null,
                 dragState: null,
                 resizeState: null,
+                bboxRect: null,
             };
+            const bboxState = {
+                items: [],
+                activeId: null,
+                drag: null,
+                overlayBound: false,
+                nextID: 1,
+                tableWidthMM: 0,
+                tableHeightMM: 0,
+            };
+            const bboxColorOptions = ['', 'B', 'G', 'GR', 'R', 'W', 'Y'];
+            const bboxDirectionOptions = ['', 'L', 'R', 'T', 'B'];
+            const bboxWireColorOptions = ['', 'GR', 'BL'];
             const createDeskGuideHandle = (labelText) => {
                 const group = new Konva.Group({
                     x: 0,
@@ -2532,6 +2802,272 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 group.add(inner);
                 group.add(label);
                 return group;
+            };
+            const readStoredBBoxItems = () => {
+                try {
+                    const raw = sessionStorage.getItem(bboxStorageKey);
+                    if (!raw) {
+                        return [];
+                    }
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed)) {
+                        return [];
+                    }
+                    return cloneBBoxItems(parsed).map((item, index) => normalizeBBoxItem(item, index + 1));
+                } catch (_) {
+                    return [];
+                }
+            };
+            const readStoredBBoxTable = () => {
+                try {
+                    const raw = sessionStorage.getItem(bboxTableStorageKey);
+                    if (!raw) {
+                        return null;
+                    }
+                    const parsed = JSON.parse(raw);
+                    return parsed && typeof parsed === 'object' ? parsed : null;
+                } catch (_) {
+                    return null;
+                }
+            };
+            const persistBBoxState = () => {
+                try {
+                    sessionStorage.setItem(bboxStorageKey, JSON.stringify(bboxState.items));
+                    sessionStorage.setItem(bboxTableStorageKey, JSON.stringify({
+                        tableWidthMM: bboxState.tableWidthMM,
+                        tableHeightMM: bboxState.tableHeightMM,
+                    }));
+                } catch (_) { }
+                renderBBoxList();
+                renderBBoxOverlay();
+                sendDeskViewSync();
+            };
+            const syncBBoxSelection = () => {
+                renderBBoxList();
+                renderBBoxOverlay();
+            };
+            const bboxOptionHtml = (options, value) => options.map((option) => {
+                const selected = (value || '') === option ? ' selected' : '';
+                const label = option || 'None';
+                return `<option value="${label === 'None' ? '' : option}"${selected}>${label}</option>`;
+            }).join('');
+            const renderBBoxList = () => {
+                if (!bboxList) {
+                    return;
+                }
+                bboxList.innerHTML = '';
+                bboxState.items.forEach((item) => {
+                    const card = document.createElement('div');
+                    card.className = 'bbox-card';
+                    card.innerHTML = `
+                        <div class="bbox-card-header">
+                            <div class="bbox-card-title">Box ${item.id}</div>
+                            <button class="bbox-card-remove" type="button" data-action="remove">Remove</button>
+                        </div>
+                        <div class="bbox-card-grid">
+                            <label class="bbox-field"><span>ID</span><input data-field="id" type="number" min="1" step="1" value="${item.id}"></label>
+                            <label class="bbox-field"><span>Table ID</span><input data-field="tableId" type="number" min="1" step="1" value="${item.tableId}"></label>
+                            <label class="bbox-field"><span>Color</span><select data-field="colorKey">${bboxOptionHtml(bboxColorOptions, item.colorKey)}</select></label>
+                            <label class="bbox-field"><span>Direction</span><select data-field="directionKey">${bboxOptionHtml(bboxDirectionOptions, item.directionKey)}</select></label>
+                            <label class="bbox-field"><span>Wire Color</span><select data-field="wireColorKey">${bboxOptionHtml(bboxWireColorOptions, item.wireColorKey)}</select></label>
+                        </div>
+                    `;
+                    card.dataset.id = String(item.id);
+                    if (bboxState.activeId === item.id) {
+                        card.style.borderColor = 'rgba(251, 191, 36, 0.5)';
+                    }
+                    card.addEventListener('click', () => {
+                        bboxState.activeId = item.id;
+                        syncBBoxSelection();
+                    });
+                    card.querySelector('[data-action="remove"]').addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        bboxState.items = bboxState.items.filter((entry) => entry.id !== item.id);
+                        if (bboxState.activeId === item.id) {
+                            bboxState.activeId = bboxState.items[0]?.id || null;
+                        }
+                        persistBBoxState();
+                    });
+                    card.querySelectorAll('[data-field]').forEach((input) => {
+                        input.addEventListener('input', (event) => {
+                            const field = event.target.dataset.field;
+                            const target = bboxState.items.find((entry) => entry.id === item.id);
+                            if (!target) {
+                                return;
+                            }
+                            const value = event.target.value;
+                            if (field === 'id' || field === 'tableId') {
+                                target[field] = Math.max(1, Math.round(Number(value || 1)));
+                            } else {
+                                target[field] = value ? value.toUpperCase() : null;
+                            }
+                            bboxState.activeId = target.id;
+                            persistBBoxState();
+                        });
+                    });
+                    bboxList.appendChild(card);
+                });
+            };
+            const clampBBoxPoint = (clientX, clientY) => {
+                const rect = deskState.bboxRect;
+                if (!rect) {
+                    return { x: 0, y: 0 };
+                }
+                return {
+                    x: clamp01((clientX - rect.x) / rect.width),
+                    y: clamp01((clientY - rect.y) / rect.height),
+                };
+            };
+            const updateBBoxElementStyle = (element, item) => {
+                const rect = deskState.bboxRect;
+                if (!element || !item || !rect) {
+                    return;
+                }
+                element.style.left = `${rect.x + item.x1 * rect.width}px`;
+                element.style.top = `${rect.y + item.y1 * rect.height}px`;
+                element.style.width = `${Math.max(18, (item.x2 - item.x1) * rect.width)}px`;
+                element.style.height = `${Math.max(18, (item.y2 - item.y1) * rect.height)}px`;
+                element.classList.toggle('is-active', bboxState.activeId === item.id);
+            };
+            const applyBBoxDrag = (clientX, clientY) => {
+                if (!bboxState.drag) {
+                    return;
+                }
+                const active = bboxState.items.find((entry) => entry.id === bboxState.drag.id);
+                if (!active) {
+                    return;
+                }
+                const point = clampBBoxPoint(clientX, clientY);
+                if (bboxState.drag.mode === 'create') {
+                    active.x1 = Math.min(bboxState.drag.startPoint.x, point.x);
+                    active.y1 = Math.min(bboxState.drag.startPoint.y, point.y);
+                    active.x2 = Math.max(bboxState.drag.startPoint.x, point.x);
+                    active.y2 = Math.max(bboxState.drag.startPoint.y, point.y);
+                } else if (bboxState.drag.mode === 'resize') {
+                    active.x2 = point.x;
+                    active.y2 = point.y;
+                } else {
+                    const dx = point.x - bboxState.drag.startPoint.x;
+                    const dy = point.y - bboxState.drag.startPoint.y;
+                    const width = bboxState.drag.initial.x2 - bboxState.drag.initial.x1;
+                    const height = bboxState.drag.initial.y2 - bboxState.drag.initial.y1;
+                    active.x1 = clamp01(bboxState.drag.initial.x1 + dx);
+                    active.y1 = clamp01(bboxState.drag.initial.y1 + dy);
+                    active.x2 = clamp01(active.x1 + width);
+                    active.y2 = clamp01(active.y1 + height);
+                    if (active.x2 >= 1) {
+                        active.x1 = clamp01(1 - width);
+                        active.x2 = 1;
+                    }
+                    if (active.y2 >= 1) {
+                        active.y1 = clamp01(1 - height);
+                        active.y2 = 1;
+                    }
+                }
+                if (active.x2 < active.x1) {
+                    [active.x1, active.x2] = [active.x2, active.x1];
+                }
+                if (active.y2 < active.y1) {
+                    [active.y1, active.y2] = [active.y2, active.y1];
+                }
+                renderBBoxOverlay();
+            };
+            const ensureBBoxOverlayBindings = () => {
+                if (!bboxOverlay || bboxState.overlayBound) {
+                    return;
+                }
+                bboxState.overlayBound = true;
+                bboxOverlay.addEventListener('pointerdown', (event) => {
+                    if (!deskState.bboxRect) {
+                        return;
+                    }
+                    const itemEl = event.target.closest('.bbox-item');
+                    if (itemEl) {
+                        const id = Number(itemEl.dataset.id || 0);
+                        const item = bboxState.items.find((entry) => entry.id === id);
+                        if (!item) {
+                            return;
+                        }
+                        bboxState.activeId = id;
+                        bboxState.drag = {
+                            id,
+                            mode: event.target.closest('.bbox-resize') ? 'resize' : 'move',
+                            pointerId: event.pointerId,
+                            startPoint: clampBBoxPoint(event.clientX, event.clientY),
+                            initial: { ...item },
+                        };
+                        bboxOverlay.setPointerCapture(event.pointerId);
+                        syncBBoxSelection();
+                        event.preventDefault();
+                        event.stopPropagation();
+                        return;
+                    }
+                    const item = defaultBBoxItem(bboxState.nextID++);
+                    const point = clampBBoxPoint(event.clientX, event.clientY);
+                    item.x1 = point.x;
+                    item.y1 = point.y;
+                    item.x2 = point.x;
+                    item.y2 = point.y;
+                    bboxState.items = [...bboxState.items, item];
+                    bboxState.activeId = item.id;
+                    bboxState.drag = {
+                        id: item.id,
+                        mode: 'create',
+                        pointerId: event.pointerId,
+                        startPoint: point,
+                        initial: { ...item },
+                    };
+                    bboxOverlay.setPointerCapture(event.pointerId);
+                    syncBBoxSelection();
+                    event.preventDefault();
+                });
+                bboxOverlay.addEventListener('pointermove', (event) => {
+                    if (!bboxState.drag || bboxState.drag.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    applyBBoxDrag(event.clientX, event.clientY);
+                    event.preventDefault();
+                });
+                const finishBBoxDrag = (event) => {
+                    if (!bboxState.drag || bboxState.drag.pointerId !== event.pointerId) {
+                        return;
+                    }
+                    const active = bboxState.items.find((entry) => entry.id === bboxState.drag.id);
+                    if (active) {
+                        if (Math.abs(active.x2 - active.x1) < 0.01 || Math.abs(active.y2 - active.y1) < 0.01) {
+                            bboxState.items = bboxState.items.filter((entry) => entry.id !== active.id);
+                            if (bboxState.activeId === active.id) {
+                                bboxState.activeId = bboxState.items[0]?.id || null;
+                            }
+                        }
+                    }
+                    bboxState.drag = null;
+                    if (bboxOverlay.hasPointerCapture(event.pointerId)) {
+                        bboxOverlay.releasePointerCapture(event.pointerId);
+                    }
+                    persistBBoxState();
+                    event.preventDefault();
+                };
+                bboxOverlay.addEventListener('pointerup', finishBBoxDrag);
+                bboxOverlay.addEventListener('pointercancel', finishBBoxDrag);
+            };
+            const renderBBoxOverlay = () => {
+                if (!bboxOverlay) {
+                    return;
+                }
+                bboxOverlay.innerHTML = '';
+                const rect = deskState.bboxRect;
+                if (!rect || rect.width <= 0 || rect.height <= 0) {
+                    return;
+                }
+                bboxState.items.forEach((item) => {
+                    const el = document.createElement('div');
+                    el.className = 'bbox-item';
+                    el.dataset.id = String(item.id);
+                    el.innerHTML = `<span class="bbox-label">#${item.id}</span><span class="bbox-resize"></span>`;
+                    updateBBoxElementStyle(el, item);
+                    bboxOverlay.appendChild(el);
+                });
             };
             const updateEffectValue = (id, value, digits = 2) => {
                 document.getElementById(id).textContent = Number(value || 0).toFixed(digits);
@@ -2626,6 +3162,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 scale: Number(effectState.scale.toFixed(2)),
                 desk: serializeDeskPoints(deskState.points),
                 guides: serializeDeskPoints(deskState.guides),
+                tableHeightMM: Number(bboxState.tableHeightMM || 0),
+                tableWidthMM: Number(bboxState.tableWidthMM || 0),
+                bboxs: bboxState.items.map((item) => ({
+                    id: item.id,
+                    tableId: item.tableId,
+                    colorKey: item.colorKey || null,
+                    directionKey: item.directionKey || null,
+                    x1: Number(item.x1.toFixed(4)),
+                    y1: Number(item.y1.toFixed(4)),
+                    x2: Number(item.x2.toFixed(4)),
+                    y2: Number(item.y2.toFixed(4)),
+                    wireColorKey: item.wireColorKey || null,
+                })),
             });
             const loadCapabilities = async (streamName) => {
                 if (!streamName) return;
@@ -3331,8 +3880,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 const dpr = window.devicePixelRatio || 1;
                 const backingWidth = Math.max(1, Math.round(cssWidth * dpr));
                 const backingHeight = Math.max(1, Math.round(cssHeight * dpr));
-                const paddingX = 18;
-                const paddingY = 18;
+                const paddingX = isDeskViewOnly ? 0 : 18;
+                const paddingY = isDeskViewOnly ? 0 : 18;
                 const availableWidth = Math.max(1, cssWidth - paddingX * 2);
                 const availableHeight = Math.max(1, cssHeight - paddingY * 2);
                 const scale = Math.min(availableWidth / outputWidth, availableHeight / outputHeight);
@@ -3363,6 +3912,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     width: drawWidth,
                     height: drawHeight,
                 };
+                deskState.bboxRect = drawRect;
+                renderBBoxOverlay();
                 const rendered = deskState.previewRenderer?.draw(
                     sourceCanvas,
                     normalizedSrcQuad,
@@ -3403,8 +3954,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     ctx.textBaseline = 'bottom';
                     ctx.fillText(`Desk ${formatDeskRatio(outputWidth, outputHeight)}`, drawX, Math.max(14, drawY - 10));
                     ctx.restore();
+                    renderBBoxOverlay();
                     return;
                 }
+                renderBBoxOverlay();
             };
             const bindInfo = (player) => player.onInfo((info) => {
                 if (info.codec) document.getElementById('codec').textContent = info.codec;
@@ -3836,6 +4389,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     deskState.guides = cloneDeskGuides(nextDeskGuides, defaultDeskGuides(deskState.points));
                     persistDeskGuides();
                 }
+                bboxState.tableHeightMM = Math.max(0, Number(payload.tableHeightMM || 0));
+                bboxState.tableWidthMM = Math.max(0, Number(payload.tableWidthMM || 0));
+                bboxTableHeight.value = String(bboxState.tableHeightMM);
+                bboxTableWidth.value = String(bboxState.tableWidthMM);
+                if (Array.isArray(payload.bboxs)) {
+                    bboxState.items = cloneBBoxItems(payload.bboxs).map((item, index) => normalizeBBoxItem(item, index + 1));
+                    bboxState.nextID = bboxState.items.reduce((maxValue, item) => Math.max(maxValue, item.id), 0) + 1;
+                    bboxState.activeId = bboxState.items[0]?.id || null;
+                    renderBBoxList();
+                    renderBBoxOverlay();
+                }
                 syncEffectState();
                 syncDeskOverlay();
                 drawDeskPreview();
@@ -4002,6 +4566,20 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 drawDeskPreview();
                 sendDeskViewSync();
             });
+            bboxAdd.addEventListener('click', () => {
+                const item = defaultBBoxItem(bboxState.nextID++);
+                bboxState.items = [...bboxState.items, item];
+                bboxState.activeId = item.id;
+                persistBBoxState();
+            });
+            bboxTableWidth.addEventListener('input', () => {
+                bboxState.tableWidthMM = Math.max(0, Number(bboxTableWidth.value || 0));
+                persistBBoxState();
+            });
+            bboxTableHeight.addEventListener('input', () => {
+                bboxState.tableHeightMM = Math.max(0, Number(bboxTableHeight.value || 0));
+                persistBBoxState();
+            });
             deskPreviewFullscreen.addEventListener('click', () => {
                 toggleViewerFullscreen();
             });
@@ -4058,6 +4636,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const initialDistortEnabled = initialParams.get('distort') === '1' || initialParams.get('distort') === 'true';
             setEffectEnabled(initialDistortEnabled);
             setDeskViewEnabled(true);
+            const storedBBoxTable = readStoredBBoxTable();
+            bboxState.tableWidthMM = Math.max(0, Number(storedBBoxTable?.tableWidthMM || 0));
+            bboxState.tableHeightMM = Math.max(0, Number(storedBBoxTable?.tableHeightMM || 0));
+            bboxState.items = readStoredBBoxItems();
+            bboxState.nextID = bboxState.items.reduce((maxValue, item) => Math.max(maxValue, item.id), 0) + 1;
+            bboxState.activeId = bboxState.items[0]?.id || null;
+            bboxTableWidth.value = String(bboxState.tableWidthMM);
+            bboxTableHeight.value = String(bboxState.tableHeightMM);
+            renderBBoxList();
+            ensureBBoxOverlayBindings();
             fisheyeFx.value = String(clampEffectValue(initialParams.get('fx'), -0.25, 0.25, effectDefaults.fx));
             fisheyeFy.value = String(clampEffectValue(initialParams.get('fy'), -0.25, 0.25, effectDefaults.fy));
             fisheyeScale.value = String(clampEffectValue(initialParams.get('scale'), 0.5, 3, effectDefaults.scale));

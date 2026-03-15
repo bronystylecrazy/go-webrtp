@@ -70,7 +70,12 @@ func (r *cpuKeyframeRenderer) Render(img image.Image, fx, fy, scale float64, des
 }
 
 func newKeyframeRenderer(logger Logger) keyframeRenderer {
-	_ = logger
+	if renderer, err := newWebGPUKeyframeRenderer(logger); err == nil {
+		logger.Printf("keyframe renderer active: %s", renderer.Name())
+		return renderer
+	} else {
+		logger.Printf("keyframe renderer fallback: %v", err)
+	}
 	return &cpuKeyframeRenderer{}
 }
 

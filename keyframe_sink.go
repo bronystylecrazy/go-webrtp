@@ -20,25 +20,32 @@ import (
 )
 
 type keyframeSink struct {
-	cfg           *Config
-	logger        Logger
-	format        string
-	renderer      keyframeRenderer
-	queue         chan keyframeJob
-	closeCh       chan struct{}
-	closeWg       sync.WaitGroup
-	dropOnce      sync.Once
-	workers       int
-	stateMu       sync.RWMutex
-	fx            float64
-	fy            float64
-	scale         float64
-	desk          []point
-	rateMu        sync.Mutex
-	lastSave      time.Time
-	writeFS       bool
-	publishMQTT   bool
-	mqttPublisher *mqttPublisher
+	cfg             *Config
+	logger          Logger
+	format          string
+	renderer        keyframeRenderer
+	queue           chan keyframeJob
+	closeCh         chan struct{}
+	closeWg         sync.WaitGroup
+	dropOnce        sync.Once
+	workers         int
+	stateMu         sync.RWMutex
+	distort         bool
+	deskEnabled     bool
+	fx              float64
+	fy              float64
+	scale           float64
+	desk            []point
+	rateMu          sync.Mutex
+	lastSave        time.Time
+	writeFS         bool
+	publishMQTT     bool
+	mqttPublisher   *mqttPublisher
+	snapshotTableID int
+	deskMetaMu      sync.Mutex
+	deskMeta        *deskViewMetadataJob
+	deskMetaWake    chan struct{}
+	deskMetaLast    time.Time
 }
 
 var imageEncodeBufferPool = sync.Pool{
@@ -48,20 +55,28 @@ var imageEncodeBufferPool = sync.Pool{
 }
 
 type decoderWorker struct {
-	h264 nativeH264Decoder
+	h264        nativeH264Decoder
+	h264Encoder nativeH264FrameEncoder
+	h264DiagLog bool
 }
 
 type keyframeJob struct {
-	codec   string
-	width   int
-	height  int
-	annexb  []byte
-	frameNo uint32
+	codec    string
+	width    int
+	height   int
+	annexb   []byte
+	frameNo  uint32
+	queuedAt time.Time
 }
 
 type point struct {
 	x float64
 	y float64
+}
+
+type deskViewMetadataJob struct {
+	topic   string
+	payload []byte
 }
 
 func newKeyframeSink(cfg *Config, logger Logger) *keyframeSink {
@@ -81,8 +96,10 @@ func newKeyframeSink(cfg *Config, logger Logger) *keyframeSink {
 		return nil
 	}
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		logger.Printf("keyframe sink disabled: ffmpeg not found: %v", err)
-		return nil
+		if strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat)) != "h264" {
+			logger.Printf("keyframe sink disabled: ffmpeg not found: %v", err)
+			return nil
+		}
 	}
 	format := strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat))
 	if format == "" {
@@ -91,7 +108,7 @@ func newKeyframeSink(cfg *Config, logger Logger) *keyframeSink {
 	if format == "jpeg" {
 		format = "jpg"
 	}
-	if format != "jpg" && format != "png" {
+	if format != "jpg" && format != "png" && format != "h264" {
 		logger.Printf("keyframe sink disabled: unsupported format %q", format)
 		return nil
 	}
@@ -102,16 +119,22 @@ func newKeyframeSink(cfg *Config, logger Logger) *keyframeSink {
 		}
 	}
 	sink := &keyframeSink{
-		cfg:         cfg,
-		logger:      logger,
-		format:      format,
-		renderer:    newKeyframeRenderer(logger),
-		scale:       1,
-		queue:       make(chan keyframeJob, 8),
-		closeCh:     make(chan struct{}),
-		workers:     3,
-		writeFS:     targets["fs"],
-		publishMQTT: targets["mqtt"],
+		cfg:             cfg,
+		logger:          logger,
+		format:          format,
+		renderer:        newKeyframeRenderer(logger),
+		distort:         true,
+		deskEnabled:     true,
+		fx:              0.12,
+		fy:              0.15,
+		scale:           0.95,
+		queue:           make(chan keyframeJob, 1),
+		closeCh:         make(chan struct{}),
+		workers:         1,
+		writeFS:         targets["fs"],
+		publishMQTT:     targets["mqtt"],
+		snapshotTableID: 1,
+		deskMetaWake:    make(chan struct{}, 1),
 	}
 	if sink.publishMQTT {
 		publisher, err := newMQTTPublisher(cfg, logger)
@@ -125,10 +148,14 @@ func newKeyframeSink(cfg *Config, logger Logger) *keyframeSink {
 		sink.closeWg.Add(1)
 		go sink.run(i)
 	}
+	if sink.publishMQTT {
+		sink.closeWg.Add(1)
+		go sink.runDeskMetadataPublisher()
+	}
 	return sink
 }
 
-func (s *keyframeSink) UpdateCalibration(fx, fy, scale float64, deskRaw string) error {
+func (s *keyframeSink) UpdateCalibration(distort, deskEnabled bool, fx, fy, scale float64, deskRaw string) error {
 	if s == nil {
 		return nil
 	}
@@ -137,6 +164,8 @@ func (s *keyframeSink) UpdateCalibration(fx, fy, scale float64, deskRaw string) 
 		return err
 	}
 	s.stateMu.Lock()
+	s.distort = distort
+	s.deskEnabled = deskEnabled
 	s.fx = fx
 	s.fy = fy
 	s.scale = normalizedScale(scale)
@@ -161,6 +190,114 @@ func (s *keyframeSink) Close() {
 	})
 }
 
+func (s *keyframeSink) PublishDeskViewMetadata(topic string, payload []byte) error {
+	if s == nil || !s.publishMQTT || s.mqttPublisher == nil || len(payload) == 0 || strings.TrimSpace(topic) == "" {
+		return nil
+	}
+	if tableID := tableIDFromInspectionTopic(topic); tableID > 0 {
+		s.deskMetaMu.Lock()
+		s.snapshotTableID = tableID
+		s.deskMetaMu.Unlock()
+	}
+	s.deskMetaMu.Lock()
+	s.deskMeta = &deskViewMetadataJob{
+		topic:   strings.TrimSpace(topic),
+		payload: append([]byte(nil), payload...),
+	}
+	s.deskMetaMu.Unlock()
+	select {
+	case s.deskMetaWake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *keyframeSink) runDeskMetadataPublisher() {
+	defer s.closeWg.Done()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	for {
+		select {
+		case <-s.closeCh:
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		case <-s.deskMetaWake:
+			s.deskMetaMu.Lock()
+			hasPending := s.deskMeta != nil
+			wait := time.Second - time.Since(s.deskMetaLast)
+			s.deskMetaMu.Unlock()
+			if !hasPending {
+				continue
+			}
+			if wait <= 0 {
+				s.flushDeskMetadata()
+				continue
+			}
+			if timer == nil {
+				timer = time.NewTimer(wait)
+				timerC = timer.C
+			} else {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(wait)
+			}
+		case <-timerC:
+			s.flushDeskMetadata()
+			timerC = nil
+		}
+	}
+}
+
+func (s *keyframeSink) flushDeskMetadata() {
+	s.deskMetaMu.Lock()
+	job := s.deskMeta
+	s.deskMeta = nil
+	s.deskMetaMu.Unlock()
+	if job == nil || s.mqttPublisher == nil {
+		return
+	}
+	if err := s.mqttPublisher.PublishRawTopic(job.topic, job.payload); err != nil {
+		s.logger.Printf("desk metadata publish failed: %v", err)
+		return
+	}
+	s.deskMetaMu.Lock()
+	s.deskMetaLast = time.Now()
+	s.deskMetaMu.Unlock()
+}
+
+func (s *keyframeSink) snapshotTable() int {
+	s.deskMetaMu.Lock()
+	defer s.deskMetaMu.Unlock()
+	if s.snapshotTableID <= 0 {
+		return 1
+	}
+	return s.snapshotTableID
+}
+
+func tableIDFromInspectionTopic(topic string) int {
+	parts := strings.Split(strings.Trim(topic, "/"), "/")
+	if len(parts) < 5 {
+		return 0
+	}
+	if parts[0] != "v1" || parts[1] != "tables" || parts[3] != "inspections" || parts[4] != "request" {
+		return 0
+	}
+	value := 0
+	for _, ch := range parts[2] {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		value = value*10 + int(ch-'0')
+	}
+	return value
+}
+
 func (s *keyframeSink) Enqueue(codec string, width, height int, au [][]byte, frameNo uint32) {
 	if s == nil || len(au) == 0 || width <= 0 || height <= 0 {
 		return
@@ -174,11 +311,12 @@ func (s *keyframeSink) Enqueue(codec string, width, height int, au [][]byte, fra
 	s.lastSave = now
 	s.rateMu.Unlock()
 	job := keyframeJob{
-		codec:   strings.ToLower(strings.TrimSpace(codec)),
-		width:   width,
-		height:  height,
-		annexb:  annexbFromAU(au),
-		frameNo: frameNo,
+		codec:    strings.ToLower(strings.TrimSpace(codec)),
+		width:    width,
+		height:   height,
+		annexb:   annexbFromAU(au),
+		frameNo:  frameNo,
+		queuedAt: now,
 	}
 	if job.codec == "" || len(job.annexb) == 0 {
 		return
@@ -186,10 +324,19 @@ func (s *keyframeSink) Enqueue(codec string, width, height int, au [][]byte, fra
 	select {
 	case s.queue <- job:
 	default:
-		s.rateMu.Lock()
-		s.lastSave = time.Time{}
-		s.rateMu.Unlock()
-		s.logger.Printf("keyframe sink queue full, dropping frame %d", frameNo)
+		select {
+		case dropped := <-s.queue:
+			s.logger.Printf("keyframe sink dropping stale queued frame %d for newer frame %d", dropped.frameNo, frameNo)
+		default:
+		}
+		select {
+		case s.queue <- job:
+		default:
+			s.rateMu.Lock()
+			s.lastSave = time.Time{}
+			s.rateMu.Unlock()
+			s.logger.Printf("keyframe sink queue full, dropping frame %d", frameNo)
+		}
 	}
 }
 
@@ -215,18 +362,43 @@ func (s *keyframeSink) run(workerID int) {
 
 func (s *keyframeSink) process(worker *decoderWorker, job keyframeJob) error {
 	start := time.Now()
-	decodeStart := start
-	img, err := decodeKeyframe(worker, job.codec, job.width, job.height, job.annexb)
-	if err != nil {
-		return err
+	queueDur := time.Duration(0)
+	if !job.queuedAt.IsZero() {
+		queueDur = start.Sub(job.queuedAt)
 	}
-	decodeDur := time.Since(decodeStart)
 	s.stateMu.RLock()
 	fx := s.fx
 	fy := s.fy
 	scale := s.scale
 	desk := append([]point(nil), s.desk...)
+	distort := s.distort
+	deskEnabled := s.deskEnabled
 	s.stateMu.RUnlock()
+	if !distort {
+		fx = 0
+		fy = 0
+		scale = 1
+	}
+	if !deskEnabled {
+		desk = nil
+	}
+	if s.format == "h264" {
+		return s.processEncodedH264(worker, job, start, queueDur, fx, fy, scale, desk)
+	}
+	decodeStart := start
+	img, err := decodeKeyframe(worker, job.codec, job.width, job.height, job.annexb)
+	if err != nil {
+		return err
+	}
+	if worker != nil && !worker.h264DiagLog {
+		if dbg, ok := worker.h264.(nativeH264DecoderDebug); ok {
+			if info := strings.TrimSpace(dbg.DebugInfo()); info != "" {
+				s.logger.Printf("keyframe decoder info: %s", info)
+				worker.h264DiagLog = true
+			}
+		}
+	}
+	decodeDur := time.Since(decodeStart)
 	renderStart := time.Now()
 	output, renderStats, err := s.renderer.Render(img, fx, fy, scale, desk)
 	if err != nil {
@@ -252,11 +424,12 @@ func (s *keyframeSink) process(worker *decoderWorker, job keyframeJob) error {
 	}
 	if s.publishMQTT && s.mqttPublisher != nil {
 		publishStart := time.Now()
-		if err := s.mqttPublisher.Publish(job.frameNo, s.format, payload); err != nil {
+		topic, err := s.mqttPublisher.PublishDeskSnapshot(s.snapshotTable(), job.frameNo, payload)
+		if err != nil {
 			return err
 		}
 		publishDur := time.Since(publishStart)
-		s.logger.Printf("keyframe sink published frame %d to mqtt topic %s", job.frameNo, s.mqttPublisher.Topic())
+		s.logger.Printf("keyframe sink published frame %d to mqtt topic %s", job.frameNo, topic)
 		s.logger.Printf(
 			"keyframe sink frame %d timings decode=%s undistort=%s rectify=%s render=%s encode=%s publish=%s total=%s renderer=%s",
 			job.frameNo,
@@ -269,6 +442,9 @@ func (s *keyframeSink) process(worker *decoderWorker, job keyframeJob) error {
 			time.Since(start).Round(time.Millisecond),
 			s.renderer.Name(),
 		)
+		if queueDur > 0 {
+			s.logger.Printf("keyframe sink frame %d queue=%s", job.frameNo, queueDur.Round(time.Millisecond))
+		}
 		return nil
 	}
 	s.logger.Printf(
@@ -283,6 +459,83 @@ func (s *keyframeSink) process(worker *decoderWorker, job keyframeJob) error {
 		time.Since(start).Round(time.Millisecond),
 		s.renderer.Name(),
 	)
+	if queueDur > 0 {
+		s.logger.Printf("keyframe sink frame %d queue=%s", job.frameNo, queueDur.Round(time.Millisecond))
+	}
+	return nil
+}
+
+func (s *keyframeSink) processEncodedH264(worker *decoderWorker, job keyframeJob, start time.Time, queueDur time.Duration, fx, fy, scale float64, desk []point) error {
+	if strings.TrimSpace(job.codec) != "h264" {
+		return fmt.Errorf("keyframeFormat=h264 requires h264 source codec, got %q", job.codec)
+	}
+	decodeDur := time.Duration(0)
+	renderDur := time.Duration(0)
+	encodeDur := time.Duration(0)
+	renderStats := keyframeRenderStats{}
+	payload := append([]byte(nil), job.annexb...)
+	rendererName := "passthrough"
+	if fx != 0 || fy != 0 || normalizedScale(scale) != 1 || len(desk) != 0 {
+		if worker == nil {
+			return fmt.Errorf("missing decoder worker for transformed h264 output")
+		}
+		decodeStart := time.Now()
+		img, err := decodeKeyframe(worker, job.codec, job.width, job.height, job.annexb)
+		if err != nil {
+			return err
+		}
+		decodeDur = time.Since(decodeStart)
+		renderStart := time.Now()
+		output, stats, err := s.renderer.Render(img, fx, fy, scale, desk)
+		if err != nil {
+			return err
+		}
+		renderDur = time.Since(renderStart)
+		renderStats = stats
+		encodeStart := time.Now()
+		payload, err = encodeH264Image(worker, output)
+		if err != nil {
+			return err
+		}
+		encodeDur = time.Since(encodeStart)
+		rendererName = s.renderer.Name()
+	}
+	streamName := sanitizeName(s.cfg.StreamName)
+	if streamName == "" {
+		streamName = "stream"
+	}
+	if s.writeFS {
+		path := filepath.Join(s.cfg.KeyframeOutput, fmt.Sprintf("%s_%012d.%s", streamName, job.frameNo, s.format))
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			return err
+		}
+		s.logger.Printf("keyframe sink saved frame %d to %s", job.frameNo, path)
+	}
+	publishDur := time.Duration(0)
+	if s.publishMQTT && s.mqttPublisher != nil {
+		publishStart := time.Now()
+		topic, err := s.mqttPublisher.PublishDeskSnapshot(s.snapshotTable(), job.frameNo, payload)
+		if err != nil {
+			return err
+		}
+		publishDur = time.Since(publishStart)
+		s.logger.Printf("keyframe sink published frame %d to mqtt topic %s", job.frameNo, topic)
+	}
+	s.logger.Printf(
+		"keyframe sink frame %d timings decode=%s undistort=%s rectify=%s render=%s encode=%s publish=%s total=%s renderer=%s",
+		job.frameNo,
+		decodeDur.Round(time.Millisecond),
+		renderStats.Undistort.Round(time.Millisecond),
+		renderStats.Rectify.Round(time.Millisecond),
+		renderDur.Round(time.Millisecond),
+		encodeDur.Round(time.Millisecond),
+		publishDur.Round(time.Millisecond),
+		time.Since(start).Round(time.Millisecond),
+		rendererName,
+	)
+	if queueDur > 0 {
+		s.logger.Printf("keyframe sink frame %d queue=%s", job.frameNo, queueDur.Round(time.Millisecond))
+	}
 	return nil
 }
 
@@ -392,6 +645,9 @@ func writeImage(path string, img image.Image, format string) error {
 }
 
 func encodeImage(img image.Image, format string) ([]byte, error) {
+	if payload, ok, err := tryEncodeImageNative(img, format, 100); ok {
+		return payload, err
+	}
 	buf := imageEncodeBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer imageEncodeBufferPool.Put(buf)
@@ -408,6 +664,20 @@ func encodeImage(img image.Image, format string) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported format %q", format)
 	}
 	return append([]byte(nil), buf.Bytes()...), nil
+}
+
+func encodeH264Image(worker *decoderWorker, img image.Image) ([]byte, error) {
+	if worker == nil {
+		return nil, fmt.Errorf("missing decoder worker")
+	}
+	if worker.h264Encoder == nil {
+		enc, err := newNativeH264FrameEncoder()
+		if err != nil {
+			return nil, err
+		}
+		worker.h264Encoder = enc
+	}
+	return worker.h264Encoder.Encode(imageToRGBA(img))
 }
 
 func readRawFrame(reader io.Reader, width, height int) (image.Image, error) {

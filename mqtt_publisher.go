@@ -3,8 +3,10 @@ package webrtp
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -86,11 +88,59 @@ func (p *mqttPublisher) Publish(frameNo uint32, format string, payload []byte) e
 	if err := p.ensureConnectedLocked(); err != nil {
 		return err
 	}
-	if err := p.writePublishLocked(payload); err != nil {
+	packetPayload, err := encodeMQTTKeyframePayload(frameNo, format, payload)
+	if err != nil {
+		return err
+	}
+	if err := p.writePublishLocked(p.topic, packetPayload, false); err != nil {
 		_ = p.closeLocked()
 		return err
 	}
 	return nil
+}
+
+func (p *mqttPublisher) PublishRawTopic(topic string, payload []byte) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureConnectedLocked(); err != nil {
+		return err
+	}
+	if err := p.writePublishLocked(topic, payload, false); err != nil {
+		_ = p.closeLocked()
+		return err
+	}
+	return nil
+}
+
+func (p *mqttPublisher) PublishDeskSnapshot(tableID int, seq uint32, frame []byte) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	if tableID <= 0 {
+		tableID = 1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureConnectedLocked(); err != nil {
+		return "", err
+	}
+	topic := fmt.Sprintf("/v1/tables/%d/frame", tableID)
+	packetPayload, err := json.Marshal(map[string]any{
+		"table_id": tableID,
+		"seq":      seq,
+		"frame":    base64.StdEncoding.EncodeToString(frame),
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := p.writePublishLocked(topic, packetPayload, true); err != nil {
+		_ = p.closeLocked()
+		return "", err
+	}
+	return topic, nil
 }
 
 func (p *mqttPublisher) Close() {
@@ -134,14 +184,14 @@ func (p *mqttPublisher) ensureConnectedLocked() error {
 	return nil
 }
 
-func (p *mqttPublisher) writePublishLocked(payload []byte) error {
+func (p *mqttPublisher) writePublishLocked(topic string, payload []byte, retain bool) error {
 	if p.conn == nil {
 		return fmt.Errorf("mqtt publisher not connected")
 	}
 	if err := p.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
-	packet := mqttPublishPacket(p.topic, payload)
+	packet := mqttPublishPacket(topic, payload, retain)
 	_, err := p.conn.Write(packet)
 	_ = p.conn.SetWriteDeadline(time.Time{})
 	if err != nil {
@@ -205,11 +255,15 @@ func readMQTTConnAck(r io.Reader) error {
 	return nil
 }
 
-func mqttPublishPacket(topic string, payload []byte) []byte {
+func mqttPublishPacket(topic string, payload []byte, retain bool) []byte {
 	var body []byte
 	body = append(body, mqttString(topic)...)
 	body = append(body, payload...)
-	packet := []byte{0x30}
+	header := byte(0x30)
+	if retain {
+		header |= 0x01
+	}
+	packet := []byte{header}
 	packet = append(packet, mqttRemainingLength(len(body))...)
 	packet = append(packet, body...)
 	return packet
@@ -258,4 +312,17 @@ func passwordFromURL(u *url.URL) string {
 	}
 	password, _ := u.User.Password()
 	return password
+}
+
+func encodeMQTTKeyframePayload(frameNo uint32, format string, payload []byte) ([]byte, error) {
+	if len(format) > 0xFFFF {
+		return nil, fmt.Errorf("mqtt keyframe format too long")
+	}
+	out := make([]byte, 4+4+2+len(format)+len(payload))
+	copy(out[:4], []byte("WKF1"))
+	binary.BigEndian.PutUint32(out[4:8], frameNo)
+	binary.BigEndian.PutUint16(out[8:10], uint16(len(format)))
+	copy(out[10:10+len(format)], format)
+	copy(out[10+len(format):], payload)
+	return out, nil
 }

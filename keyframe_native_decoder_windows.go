@@ -3,7 +3,7 @@
 package webrtp
 
 /*
-#cgo LDFLAGS: -lole32 -loleaut32 -lmfplat -lmf -lmfuuid -lpropsys
+#cgo LDFLAGS: -lole32 -loleaut32 -lmfplat -lmf -lmfuuid -lpropsys -ld3d11 -ldxgi
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -13,6 +13,7 @@ WebrtpMFH264DecoderRef WebrtpMFH264DecoderCreate(char **errOut);
 void WebrtpMFH264DecoderClose(WebrtpMFH264DecoderRef ref);
 int WebrtpMFH264DecoderDecodeH264(WebrtpMFH264DecoderRef ref, const void *sample, int sampleLen, const void *sps, int spsLen, const void *pps, int ppsLen, void **outData, int *outWidth, int *outHeight, int *outStride, char **errOut);
 void WebrtpMFH264DecoderFreeFrame(void *ptr);
+char *WebrtpMFH264DecoderDebugInfo(WebrtpMFH264DecoderRef ref);
 */
 import "C"
 
@@ -148,17 +149,13 @@ func (d *mediaFoundationH264Decoder) Decode(annexb []byte) (image.Image, error) 
 	stride := int(outStride)
 	src := unsafe.Slice((*byte)(outData), stride*height)
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	if stride == dst.Stride {
+		copy(dst.Pix, src)
+		return dst, nil
+	}
+	rowBytes := width * 4
 	for y := 0; y < height; y++ {
-		srcRow := y * stride
-		dstRow := y * dst.Stride
-		for x := 0; x < width; x++ {
-			srcPix := srcRow + x*4
-			dstPix := dstRow + x*4
-			dst.Pix[dstPix+0] = src[srcPix+2]
-			dst.Pix[dstPix+1] = src[srcPix+1]
-			dst.Pix[dstPix+2] = src[srcPix+0]
-			dst.Pix[dstPix+3] = src[srcPix+3]
-		}
+		copy(dst.Pix[y*dst.Stride:y*dst.Stride+rowBytes], src[y*stride:y*stride+rowBytes])
 	}
 	return dst, nil
 }
@@ -170,6 +167,18 @@ func (d *mediaFoundationH264Decoder) Close() error {
 	C.WebrtpMFH264DecoderClose(d.ref)
 	d.ref = nil
 	return nil
+}
+
+func (d *mediaFoundationH264Decoder) DebugInfo() string {
+	if d == nil || d.ref == nil {
+		return ""
+	}
+	info := C.WebrtpMFH264DecoderDebugInfo(d.ref)
+	if info == nil {
+		return ""
+	}
+	defer C.free(unsafe.Pointer(info))
+	return C.GoString(info)
 }
 
 func (w *decoderWorker) decodeH264(annexb []byte) (image.Image, error) {
@@ -187,9 +196,15 @@ func (w *decoderWorker) decodeH264(annexb []byte) (image.Image, error) {
 }
 
 func (w *decoderWorker) close() {
-	if w == nil || w.h264 == nil {
+	if w == nil {
 		return
 	}
-	_ = w.h264.Close()
-	w.h264 = nil
+	if w.h264 != nil {
+		_ = w.h264.Close()
+		w.h264 = nil
+	}
+	if w.h264Encoder != nil {
+		_ = w.h264Encoder.Close()
+		w.h264Encoder = nil
+	}
 }

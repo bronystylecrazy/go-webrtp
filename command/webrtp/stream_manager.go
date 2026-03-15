@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -58,7 +59,10 @@ type StreamApiRequest struct {
 
 type RenditionApiResponse struct {
 	Name        string              `json:"name"`
-	BitrateKbps int                 `json:"bitrateKbps"`
+	Width       *int                `json:"width,omitempty"`
+	Height      *int                `json:"height,omitempty"`
+	FrameRate   *float64            `json:"frameRate,omitempty"`
+	BitrateKbps *int                `json:"bitrateKbps,omitempty"`
 	OnDemand    bool                `json:"onDemand"`
 	WsPath      string              `json:"wsPath"`
 	Stats       *webrtp.StreamStats `json:"stats,omitempty"`
@@ -97,6 +101,13 @@ type StreamCapabilitiesResponse struct {
 	SourceType   string                        `json:"sourceType"`
 	Device       string                        `json:"device,omitempty"`
 	Capabilities *webrtp.UsbDeviceCapabilities `json:"capabilities,omitempty"`
+}
+
+type RecordingFileResponse struct {
+	Name         string    `json:"name"`
+	Path         string    `json:"path"`
+	SizeBytes    int64     `json:"sizeBytes"`
+	LastModified time.Time `json:"lastModified"`
 }
 
 func StreamManagerNew(configPath string, cfg *Config) (*StreamManager, error) {
@@ -595,6 +606,99 @@ func (r *StreamManager) StreamDelete(name string) error {
 	return nil
 }
 
+func (r *StreamManager) StreamSetEnabled(name string, enabled bool) (*StreamApiResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	index := -1
+	for idx, group := range r.groups {
+		if group.Name == name {
+			index = idx
+			break
+		}
+	}
+	if index < 0 {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+
+	oldUpstream := r.config.Upstreams[index]
+	oldGroup := r.groups[index]
+	upstream := *oldUpstream
+	upstream.Enabled = boolPtr(enabled)
+
+	group, err := r.streamGroupCreate(index, &upstream)
+	if err != nil {
+		return nil, err
+	}
+
+	r.config.Upstreams[index] = &upstream
+	r.groups[index] = group
+	delete(r.groupsByName, name)
+	r.groupsByName[group.Name] = group
+	for _, stream := range oldGroup.Streams {
+		delete(r.streamsByName, stream.Name)
+	}
+	for _, stream := range group.Streams {
+		r.streamsByName[stream.Name] = stream
+	}
+
+	if err := r.configSave(); err != nil {
+		r.config.Upstreams[index] = oldUpstream
+		r.groups[index] = oldGroup
+		delete(r.groupsByName, group.Name)
+		r.groupsByName[oldGroup.Name] = oldGroup
+		for _, stream := range group.Streams {
+			delete(r.streamsByName, stream.Name)
+			_ = stream.Stop()
+		}
+		for _, stream := range oldGroup.Streams {
+			r.streamsByName[stream.Name] = stream
+		}
+		return nil, err
+	}
+
+	for _, stream := range oldGroup.Streams {
+		_ = stream.Stop()
+	}
+	return r.streamResponse(index, group), nil
+}
+
+func (r *StreamManager) StreamStart(name, quality string) (*StreamApiResponse, error) {
+	stream, ok := r.StreamByNameQualityAny(name, quality)
+	if !ok {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+	stream.EnsureStarted()
+	groupName := stream.GroupName
+	if groupName == "" {
+		groupName = stream.Name
+	}
+	item, ok := r.StreamStatus(groupName)
+	if !ok {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+	return item, nil
+}
+
+func (r *StreamManager) StreamStop(name, quality string) (*StreamApiResponse, error) {
+	stream, ok := r.StreamByNameQualityAny(name, quality)
+	if !ok {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+	if err := stream.StopNow(); err != nil {
+		return nil, err
+	}
+	groupName := stream.GroupName
+	if groupName == "" {
+		groupName = stream.Name
+	}
+	item, ok := r.StreamStatus(groupName)
+	if !ok {
+		return nil, fmt.Errorf("stream not found: %s", name)
+	}
+	return item, nil
+}
+
 func (r *StreamManager) StreamStopAll() {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -770,10 +874,16 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 	if len(group.Streams) > 1 {
 		resp.Renditions = make([]*RenditionApiResponse, 0, len(group.Streams))
 		for _, stream := range group.Streams {
-			bitrate := 0
+			var bitrate *int
+			var width *int
+			var height *int
+			var frameRate *float64
 			for _, rendition := range group.Upstream.Renditions {
 				if rendition.Name == stream.RenditionName {
 					bitrate = rendition.BitrateKbps
+					width = rendition.Width
+					height = rendition.Height
+					frameRate = rendition.FrameRate
 					break
 				}
 			}
@@ -781,6 +891,9 @@ func (r *StreamManager) streamResponse(index int, group *StreamGroup) *StreamApi
 			stats.Name = stream.Name
 			resp.Renditions = append(resp.Renditions, &RenditionApiResponse{
 				Name:        stream.RenditionName,
+				Width:       width,
+				Height:      height,
+				FrameRate:   frameRate,
 				BitrateKbps: bitrate,
 				OnDemand:    stream.OnDemand,
 				WsPath:      streamWsPath(stream, group.Upstream),
@@ -855,8 +968,8 @@ func StreamValidateUpstream(upstream *Upstream) error {
 	}
 	if upstream.KeyframeFormat != "" {
 		format := strings.ToLower(upstream.KeyframeFormat)
-		if format != "jpg" && format != "jpeg" && format != "png" {
-			return fmt.Errorf("keyframeFormat must be jpg or png")
+		if format != "jpg" && format != "jpeg" && format != "png" && format != "h264" {
+			return fmt.Errorf("keyframeFormat must be jpg, png, or h264")
 		}
 	}
 	sinks, err := parseKeyframeSinkTargets(upstream.KeyframeSink)
@@ -880,8 +993,8 @@ func StreamValidateUpstream(upstream *Upstream) error {
 		if StreamUpstreamSourceType(upstream) != "usb" {
 			return fmt.Errorf("renditions are only supported for usb streams")
 		}
-		if runtime.GOOS != "darwin" {
-			return fmt.Errorf("usb renditions are only supported on macos")
+		if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+			return fmt.Errorf("usb renditions are only supported on macos and windows")
 		}
 		for _, rendition := range upstream.Renditions {
 			if rendition == nil {
@@ -890,8 +1003,20 @@ func StreamValidateUpstream(upstream *Upstream) error {
 			if rendition.Name == "" {
 				return fmt.Errorf("rendition missing required name")
 			}
-			if rendition.BitrateKbps <= 0 {
-				return fmt.Errorf("rendition %s missing valid bitrateKbps", rendition.Name)
+			if rendition.Width != nil && *rendition.Width <= 0 {
+				return fmt.Errorf("rendition %s has invalid width", rendition.Name)
+			}
+			if rendition.Height != nil && *rendition.Height <= 0 {
+				return fmt.Errorf("rendition %s has invalid height", rendition.Name)
+			}
+			if rendition.FrameRate != nil && *rendition.FrameRate <= 0 {
+				return fmt.Errorf("rendition %s has invalid frameRate", rendition.Name)
+			}
+			if rendition.BitrateKbps != nil && *rendition.BitrateKbps <= 0 {
+				return fmt.Errorf("rendition %s has invalid bitrateKbps", rendition.Name)
+			}
+			if rendition.Width == nil && rendition.Height == nil && rendition.FrameRate == nil && rendition.BitrateKbps == nil {
+				return fmt.Errorf("rendition %s must override at least one of width, height, frameRate, or bitrateKbps", rendition.Name)
 			}
 		}
 	}
@@ -949,7 +1074,22 @@ func StreamRenditionDefaultIndex(renditions []*Rendition) int {
 func StreamUpstreamWithRendition(upstream *Upstream, rendition *Rendition) *Upstream {
 	name := StreamUpstreamName(0, upstream)
 	sourceType := StreamUpstreamSourceType(upstream)
-	bitrate := rendition.BitrateKbps
+	width := upstream.Width
+	if rendition.Width != nil {
+		width = rendition.Width
+	}
+	height := upstream.Height
+	if rendition.Height != nil {
+		height = rendition.Height
+	}
+	frameRate := upstream.FrameRate
+	if rendition.FrameRate != nil {
+		frameRate = rendition.FrameRate
+	}
+	bitrate := upstream.BitrateKbps
+	if rendition.BitrateKbps != nil {
+		bitrate = rendition.BitrateKbps
+	}
 	onDemand := upstream.OnDemand
 	if rendition.OnDemand != nil {
 		onDemand = *rendition.OnDemand
@@ -961,10 +1101,10 @@ func StreamUpstreamWithRendition(upstream *Upstream, rendition *Rendition) *Upst
 		Device:            upstream.Device,
 		Path:              upstream.Path,
 		Codec:             upstream.Codec,
-		Width:             upstream.Width,
-		Height:            upstream.Height,
-		FrameRate:         upstream.FrameRate,
-		BitrateKbps:       &bitrate,
+		Width:             width,
+		Height:            height,
+		FrameRate:         frameRate,
+		BitrateKbps:       bitrate,
 		ServeStream:       upstream.ServeStream,
 		CalibrationFrom:   upstream.CalibrationFrom,
 		KeyframeSink:      upstream.KeyframeSink,
@@ -1028,4 +1168,55 @@ func parseKeyframeSinkTargets(raw string) (map[string]bool, error) {
 		}
 	}
 	return targets, nil
+}
+
+func RecordingsList(root string) ([]*RecordingFileResponse, error) {
+	entries := make([]*RecordingFileResponse, 0)
+	if strings.TrimSpace(root) == "" {
+		root = "recordings"
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return entries, nil
+		}
+		return nil, fmt.Errorf("stat recordings root: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("recordings root is not a directory: %s", root)
+	}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, &RecordingFileResponse{
+			Name:         filepath.Base(path),
+			Path:         filepath.ToSlash(rel),
+			SizeBytes:    info.Size(),
+			LastModified: info.ModTime(),
+		})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("walk recordings root: %w", err)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].LastModified.Equal(entries[j].LastModified) {
+			return entries[i].Path < entries[j].Path
+		}
+		return entries[i].LastModified.After(entries[j].LastModified)
+	})
+	return entries, nil
 }

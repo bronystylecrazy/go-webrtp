@@ -88,7 +88,9 @@ For file sources:
 - `onDemand` is optional; when `true`, playback starts on first viewer and stops a few seconds after the last viewer disconnects
 - `keyframeSink` is optional and currently supports `fs`
 - `keyframeOutput` is optional; when set, each IDR frame is decoded server-side and written to that directory
-- `keyframeFormat` is optional and supports `jpg` or `png` (default: `jpg`)
+- `keyframeFormat` is optional and supports `jpg`, `png`, or `h264` (default: `jpg`)
+- `keyframeFormat: h264` publishes raw H.264 keyframes directly and skips server-side image decode/render/encode
+- `keyframeFormat: h264` does not support undistort or desk-view rectification
 - keyframe undistortion and desk crop are synced live from the frontend calibration endpoint, not from static config
 
 For USB sources:
@@ -99,9 +101,11 @@ For USB sources:
 - `frameRate` is optional
 - `bitrateKbps` is optional
 - `onDemand` is optional; when `true`, renditions start on first viewer and stop a few seconds after the last viewer disconnects
-- `renditions` is optional for macOS USB streams; select one with `?quality=low`, `?quality=mid`, or `?quality=high`
+- `renditions` is optional for macOS and Windows USB streams; select one with `?quality=low`, `?quality=mid`, or `?quality=high`
+- each USB rendition can override `width`, `height`, `frameRate`, and `bitrateKbps`
 - on macOS, the stream framerate is derived from actual camera timestamps; `frameRate` acts only as an optional capture/encoder hint
 - on macOS, `bitrateKbps` configures the native `VideoToolbox` encoder target bitrate for USB streams
+- on Windows, `width`, `height`, and `frameRate` select the closest native compressed Media Foundation mode exposed by the camera
 - on Linux, `frameRate` is still used when synthesizing timestamps for compressed `v4l2` sources
 
 Native USB support currently includes:

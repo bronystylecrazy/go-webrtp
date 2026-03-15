@@ -220,5 +220,6 @@ func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
 		return nil, fmt.Errorf("parse usb capabilities: %w", err)
 	}
+	populateSuggestedUsbRenditions(caps)
 	return caps, nil
 }

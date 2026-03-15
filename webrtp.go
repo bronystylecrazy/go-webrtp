@@ -193,9 +193,16 @@ func (r *Instance) currentRecorder() *Recorder {
 	return r.recorder
 }
 
-func (r *Instance) UpdateKeyframeCalibration(fx, fy, scale float64, desk string) error {
+func (r *Instance) UpdateKeyframeCalibration(distort, deskEnabled bool, fx, fy, scale float64, desk string) error {
 	if r == nil || r.keyframes == nil {
 		return nil
 	}
-	return r.keyframes.UpdateCalibration(fx, fy, scale, desk)
+	return r.keyframes.UpdateCalibration(distort, deskEnabled, fx, fy, scale, desk)
+}
+
+func (r *Instance) PublishDeskViewMetadata(topic string, payload []byte) error {
+	if r == nil || r.keyframes == nil {
+		return nil
+	}
+	return r.keyframes.PublishDeskViewMetadata(topic, payload)
 }

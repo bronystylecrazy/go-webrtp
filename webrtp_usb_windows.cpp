@@ -1,14 +1,19 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mftransform.h>
 #include <mferror.h>
 #include <propvarutil.h>
+#include <wmcodecdsp.h>
+#include <codecapi.h>
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -24,7 +29,10 @@ struct WinCapture {
     uintptr_t handle;
     std::wstring device;
     std::wstring codec;
+    int width;
+    int height;
     double fps;
+    int bitrateKbps;
     bool started;
     std::string error;
 };
@@ -33,6 +41,37 @@ struct MediaTypeSelection {
     IMFMediaType *type;
     UINT32 width;
     UINT32 height;
+};
+
+struct RawOutputSelection {
+    GUID inputSubtype;
+    GUID outputSubtype;
+    UINT32 width;
+    UINT32 height;
+    UINT32 fpsNum;
+    UINT32 fpsDen;
+};
+
+struct EncodedPacket {
+    std::vector<uint8_t> annexb;
+    LONGLONG sampleTime;
+};
+
+struct H264EncoderContext {
+    IMFTransform *transform;
+    IMFMediaType *inputType;
+    IMFMediaType *outputType;
+    ICodecAPI *codecApi;
+    UINT32 width;
+    UINT32 height;
+    UINT32 fpsNum;
+    UINT32 fpsDen;
+    UINT32 bitrate;
+    GUID inputSubtype;
+    std::vector<std::vector<uint8_t>> codecConfig;
+    uint32_t nalLengthSize;
+    bool streamingBegun;
+    LONGLONG nextForcedKeyframeTime;
 };
 
 std::wstring Utf8ToWide(const char *src) {
@@ -97,6 +136,17 @@ void SafeRelease(T **ptr) {
 
 bool GuidEqual(const GUID &a, const GUID &b) {
     return memcmp(&a, &b, sizeof(GUID)) == 0;
+}
+
+bool IsCompressedSubtype(const GUID &subtype) {
+    return GuidEqual(subtype, MFVideoFormat_H264) || GuidEqual(subtype, MFVideoFormat_HEVC);
+}
+
+bool IsRawOrConvertibleSubtype(const GUID &subtype) {
+    return GuidEqual(subtype, MFVideoFormat_NV12) ||
+           GuidEqual(subtype, MFVideoFormat_YUY2) ||
+           GuidEqual(subtype, MFVideoFormat_MJPG) ||
+           GuidEqual(subtype, MFVideoFormat_RGB32);
 }
 
 std::wstring CaptureErrorMessage(HRESULT hr, const char *msg) {
@@ -229,11 +279,209 @@ HRESULT DeviceListString(std::string *resultOut) {
     return S_OK;
 }
 
-HRESULT SelectCompressedMediaType(IMFSourceReader *reader, const GUID &subtype, double fpsHint, MediaTypeSelection *selectionOut) {
+std::string JsonEscape(const std::string &src) {
+    std::string out;
+    out.reserve(src.size() + 8);
+    for (char ch : src) {
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            out += ch;
+            break;
+        }
+    }
+    return out;
+}
+
+struct CapabilityModeEntry {
+    UINT32 width;
+    UINT32 height;
+    std::vector<double> fps;
+};
+
+void AppendUniqueFps(std::vector<double> *values, double fps) {
+    if (values == nullptr || fps <= 0) {
+        return;
+    }
+    for (double existing : *values) {
+        if (fabs(existing - fps) < 0.01) {
+            return;
+        }
+    }
+    values->push_back(fps);
+}
+
+void SortFps(std::vector<double> *values) {
+    if (values == nullptr) {
+        return;
+    }
+    std::sort(values->begin(), values->end());
+}
+
+void MergeMode(std::vector<CapabilityModeEntry> *modes, UINT32 width, UINT32 height, double fps) {
+    if (modes == nullptr || width == 0 || height == 0) {
+        return;
+    }
+    for (auto &mode : *modes) {
+        if (mode.width == width && mode.height == height) {
+            AppendUniqueFps(&mode.fps, fps);
+            return;
+        }
+    }
+    CapabilityModeEntry mode = {};
+    mode.width = width;
+    mode.height = height;
+    AppendUniqueFps(&mode.fps, fps);
+    modes->push_back(mode);
+}
+
+CapabilityModeEntry *FindMode(std::vector<CapabilityModeEntry> *modes, UINT32 width, UINT32 height) {
+    if (modes == nullptr) {
+        return nullptr;
+    }
+    for (auto &mode : *modes) {
+        if (mode.width == width && mode.height == height) {
+            return &mode;
+        }
+    }
+    return nullptr;
+}
+
+HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
+    if (device == nullptr || resultOut == nullptr) {
+        return E_POINTER;
+    }
+    IMFMediaSource *source = nullptr;
+    IMFSourceReader *reader = nullptr;
+    std::vector<CapabilityModeEntry> h264Modes;
+    std::vector<CapabilityModeEntry> h265Modes;
+    std::wstring name;
+    std::wstring id;
+    DeviceString(device, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name);
+    DeviceString(device, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &id);
+
+    HRESULT hr = device->ActivateObject(IID_PPV_ARGS(&source));
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = MFCreateSourceReaderFromMediaSource(source, nullptr, &reader);
+    if (FAILED(hr)) {
+        SafeRelease(&source);
+        return hr;
+    }
+
+    for (DWORD idx = 0;; idx++) {
+        IMFMediaType *mediaType = nullptr;
+        hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx, &mediaType);
+        if (hr == MF_E_NO_MORE_TYPES) {
+            hr = S_OK;
+            break;
+        }
+        if (FAILED(hr)) {
+            break;
+        }
+        GUID subtype = GUID_NULL;
+        UINT32 width = 0;
+        UINT32 height = 0;
+        UINT32 frNum = 0;
+        UINT32 frDen = 0;
+        mediaType->GetGUID(MF_MT_SUBTYPE, &subtype);
+        MFGetAttributeSize(mediaType, MF_MT_FRAME_SIZE, &width, &height);
+        MFGetAttributeRatio(mediaType, MF_MT_FRAME_RATE, &frNum, &frDen);
+        double fps = (frDen != 0) ? static_cast<double>(frNum) / static_cast<double>(frDen) : 0.0;
+        if (GuidEqual(subtype, MFVideoFormat_H264)) {
+            MergeMode(&h264Modes, width, height, fps);
+        } else if (GuidEqual(subtype, MFVideoFormat_HEVC)) {
+            MergeMode(&h265Modes, width, height, fps);
+        }
+        SafeRelease(&mediaType);
+    }
+    SafeRelease(&reader);
+    SafeRelease(&source);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    auto sortModes = [](std::vector<CapabilityModeEntry> *modes) {
+        if (modes == nullptr) return;
+        for (auto &mode : *modes) {
+            SortFps(&mode.fps);
+        }
+        std::sort(modes->begin(), modes->end(), [](const CapabilityModeEntry &a, const CapabilityModeEntry &b) {
+            UINT64 areaA = static_cast<UINT64>(a.width) * static_cast<UINT64>(a.height);
+            UINT64 areaB = static_cast<UINT64>(b.width) * static_cast<UINT64>(b.height);
+            if (areaA == areaB) {
+                if (a.width == b.width) return a.height < b.height;
+                return a.width < b.width;
+            }
+            return areaA < areaB;
+        });
+    };
+    sortModes(&h264Modes);
+    sortModes(&h265Modes);
+
+    std::vector<std::string> codecs;
+    if (!h264Modes.empty()) codecs.push_back("h264");
+    if (!h265Modes.empty()) codecs.push_back("h265");
+
+    std::vector<CapabilityModeEntry> mergedModes = h264Modes;
+    for (const auto &mode : h265Modes) {
+        CapabilityModeEntry *target = FindMode(&mergedModes, mode.width, mode.height);
+        if (target == nullptr) {
+            mergedModes.push_back(mode);
+            continue;
+        }
+        for (double fps : mode.fps) {
+            AppendUniqueFps(&target->fps, fps);
+        }
+        SortFps(&target->fps);
+    }
+    sortModes(&mergedModes);
+
+    std::string json = "{";
+    json += "\"device\":{\"id\":\"" + JsonEscape(WideToUtf8String(id)) + "\",\"name\":\"" + JsonEscape(WideToUtf8String(name)) + "\"},";
+    json += "\"codecs\":[";
+    for (size_t i = 0; i < codecs.size(); i++) {
+        if (i > 0) json += ",";
+        json += "\"" + codecs[i] + "\"";
+    }
+    json += "],";
+    json += "\"bitrateControl\":\"native\",";
+    json += "\"modes\":[";
+    for (size_t i = 0; i < mergedModes.size(); i++) {
+        if (i > 0) json += ",";
+        const auto &mode = mergedModes[i];
+        json += "{\"width\":" + std::to_string(mode.width) + ",\"height\":" + std::to_string(mode.height);
+        if (!mode.fps.empty()) {
+            json += ",\"fps\":[";
+            for (size_t f = 0; f < mode.fps.size(); f++) {
+                if (f > 0) json += ",";
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%.2f", mode.fps[f]);
+                std::string fpsString(buf);
+                while (!fpsString.empty() && fpsString.back() == '0') fpsString.pop_back();
+                if (!fpsString.empty() && fpsString.back() == '.') fpsString.pop_back();
+                json += fpsString;
+            }
+            json += "]";
+        }
+        json += "}";
+    }
+    json += "]}";
+    *resultOut = json;
+    return S_OK;
+}
+
+HRESULT SelectCompressedMediaType(IMFSourceReader *reader, const GUID &subtype, int widthHint, int heightHint, double fpsHint, MediaTypeSelection *selectionOut) {
     IMFMediaType *best = nullptr;
     UINT32 bestWidth = 0;
     UINT32 bestHeight = 0;
-    UINT64 bestPixels = 0;
+    double bestScore = 0.0;
+    bool bestScoreSet = false;
 
     for (DWORD idx = 0;; idx++) {
         IMFMediaType *mediaType = nullptr;
@@ -258,33 +506,36 @@ HRESULT SelectCompressedMediaType(IMFSourceReader *reader, const GUID &subtype, 
         UINT32 frDen = 0;
         MFGetAttributeRatio(mediaType, MF_MT_FRAME_RATE, &frNum, &frDen);
         double fps = (frDen != 0) ? static_cast<double>(frNum) / static_cast<double>(frDen) : 0.0;
-        UINT64 pixels = static_cast<UINT64>(width) * static_cast<UINT64>(height);
-
-        bool better = false;
-        if (best == nullptr) {
-            better = true;
-        } else if (fpsHint > 0 && fps > 0) {
-            double bestFrNum = 0;
-            UINT32 oldNum = 0;
-            UINT32 oldDen = 0;
-            if (SUCCEEDED(MFGetAttributeRatio(best, MF_MT_FRAME_RATE, &oldNum, &oldDen)) && oldDen != 0) {
-                bestFrNum = static_cast<double>(oldNum) / static_cast<double>(oldDen);
-            }
-            double curScore = fabs(fps - fpsHint);
-            double bestScore = bestFrNum > 0 ? fabs(bestFrNum - fpsHint) : 1000000.0;
-            if (curScore < bestScore || (curScore == bestScore && pixels > bestPixels)) {
-                better = true;
-            }
-        } else if (pixels > bestPixels) {
-            better = true;
+        double score = 0.0;
+        if (widthHint > 0) {
+            score += fabs(static_cast<double>(width) - widthHint) * 1000.0;
         }
+        if (heightHint > 0) {
+            score += fabs(static_cast<double>(height) - heightHint) * 1000.0;
+        }
+        if (fpsHint > 0) {
+            if (fps > 0) {
+                score += fabs(fps - fpsHint) * 100.0;
+            } else {
+                score += 1000000.0;
+            }
+        }
+        if (widthHint <= 0 && heightHint <= 0) {
+            score -= static_cast<double>(width) * static_cast<double>(height) / 1000000.0;
+        }
+        if (fpsHint <= 0 && fps > 0) {
+            score -= fps / 1000.0;
+        }
+
+        bool better = !bestScoreSet || score < bestScore;
 
         if (better) {
             SafeRelease(&best);
             best = mediaType;
             bestWidth = width;
             bestHeight = height;
-            bestPixels = pixels;
+            bestScore = score;
+            bestScoreSet = true;
         } else {
             SafeRelease(&mediaType);
         }
@@ -297,6 +548,100 @@ HRESULT SelectCompressedMediaType(IMFSourceReader *reader, const GUID &subtype, 
     selectionOut->width = bestWidth;
     selectionOut->height = bestHeight;
     return S_OK;
+}
+
+HRESULT SelectRawMediaType(IMFSourceReader *reader, int widthHint, int heightHint, double fpsHint, RawOutputSelection *selectionOut) {
+    if (reader == nullptr || selectionOut == nullptr) {
+        return E_POINTER;
+    }
+    IMFMediaType *best = nullptr;
+    GUID bestSubtype = GUID_NULL;
+    UINT32 bestWidth = 0;
+    UINT32 bestHeight = 0;
+    UINT32 bestFrNum = 0;
+    UINT32 bestFrDen = 1;
+    double bestScore = 0.0;
+    bool bestScoreSet = false;
+
+    for (DWORD idx = 0;; idx++) {
+        IMFMediaType *mediaType = nullptr;
+        HRESULT hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx, &mediaType);
+        if (hr == MF_E_NO_MORE_TYPES) {
+            break;
+        }
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        GUID subtype = GUID_NULL;
+        if (FAILED(mediaType->GetGUID(MF_MT_SUBTYPE, &subtype)) || !IsRawOrConvertibleSubtype(subtype)) {
+            SafeRelease(&mediaType);
+            continue;
+        }
+
+        UINT32 width = 0;
+        UINT32 height = 0;
+        UINT32 frNum = 0;
+        UINT32 frDen = 0;
+        MFGetAttributeSize(mediaType, MF_MT_FRAME_SIZE, &width, &height);
+        MFGetAttributeRatio(mediaType, MF_MT_FRAME_RATE, &frNum, &frDen);
+        double fps = (frDen != 0) ? static_cast<double>(frNum) / static_cast<double>(frDen) : 0.0;
+        double score = 0.0;
+        if (widthHint > 0) score += fabs(static_cast<double>(width) - widthHint) * 1000.0;
+        if (heightHint > 0) score += fabs(static_cast<double>(height) - heightHint) * 1000.0;
+        if (fpsHint > 0) {
+            if (fps > 0) score += fabs(fps - fpsHint) * 100.0;
+            else score += 1000000.0;
+        }
+        if (GuidEqual(subtype, MFVideoFormat_NV12)) score -= 20.0;
+        else if (GuidEqual(subtype, MFVideoFormat_YUY2)) score -= 10.0;
+        else if (GuidEqual(subtype, MFVideoFormat_MJPG)) score += 5.0;
+        else if (GuidEqual(subtype, MFVideoFormat_RGB32)) score += 20.0;
+
+        bool better = !bestScoreSet || score < bestScore;
+        if (better) {
+            SafeRelease(&best);
+            best = mediaType;
+            bestSubtype = subtype;
+            bestWidth = width;
+            bestHeight = height;
+            bestFrNum = frNum;
+            bestFrDen = frDen != 0 ? frDen : 1;
+            bestScore = score;
+            bestScoreSet = true;
+        } else {
+            SafeRelease(&mediaType);
+        }
+    }
+
+    if (best == nullptr) {
+        return MF_E_TOPO_CODEC_NOT_FOUND;
+    }
+    SafeRelease(&best);
+    selectionOut->inputSubtype = bestSubtype;
+    selectionOut->outputSubtype = GuidEqual(bestSubtype, MFVideoFormat_NV12) ? MFVideoFormat_NV12 : MFVideoFormat_YUY2;
+    selectionOut->width = bestWidth;
+    selectionOut->height = bestHeight;
+    selectionOut->fpsNum = bestFrNum != 0 ? bestFrNum : 30;
+    selectionOut->fpsDen = bestFrDen != 0 ? bestFrDen : 1;
+    return S_OK;
+}
+
+HRESULT SetReaderRawOutputType(IMFSourceReader *reader, const RawOutputSelection &selection) {
+    IMFMediaType *requested = nullptr;
+    HRESULT hr = MFCreateMediaType(&requested);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    if (SUCCEEDED(hr)) hr = requested->SetGUID(MF_MT_SUBTYPE, selection.outputSubtype);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeSize(requested, MF_MT_FRAME_SIZE, selection.width, selection.height);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(requested, MF_MT_FRAME_RATE, selection.fpsNum, selection.fpsDen);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(requested, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    if (SUCCEEDED(hr)) hr = requested->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, requested);
+    SafeRelease(&requested);
+    return hr;
 }
 
 std::vector<std::vector<uint8_t>> ParseAvcc(const uint8_t *data, size_t size, uint32_t *nalLengthSizeOut) {
@@ -411,6 +756,210 @@ std::vector<uint8_t> ToAnnexB(const uint8_t *data, size_t size, uint32_t nalLeng
     return out;
 }
 
+UINT32 DefaultH264Bitrate(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fpsDen) {
+    double fps = (fpsDen != 0) ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 30.0;
+    double bits = static_cast<double>(width) * static_cast<double>(height) * std::max(1.0, fps) * 0.12;
+    if (bits < 500000.0) bits = 500000.0;
+    if (bits > 12000000.0) bits = 12000000.0;
+    return static_cast<UINT32>(bits);
+}
+
+HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fpsDen, UINT32 bitrate, GUID inputSubtype, H264EncoderContext *ctx) {
+    if (ctx == nullptr) {
+        return E_POINTER;
+    }
+    *ctx = H264EncoderContext{};
+    ctx->width = width;
+    ctx->height = height;
+    ctx->fpsNum = fpsNum != 0 ? fpsNum : 30;
+    ctx->fpsDen = fpsDen != 0 ? fpsDen : 1;
+    ctx->bitrate = bitrate != 0 ? bitrate : DefaultH264Bitrate(width, height, ctx->fpsNum, ctx->fpsDen);
+    ctx->inputSubtype = inputSubtype;
+    ctx->nalLengthSize = 4;
+    ctx->nextForcedKeyframeTime = 0;
+
+    HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&ctx->transform));
+    if (FAILED(hr) || ctx->transform == nullptr) {
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    IMFMediaType *outputType = nullptr;
+    hr = MFCreateMediaType(&outputType);
+    if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeSize(outputType, MF_MT_FRAME_SIZE, width, height);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(outputType, MF_MT_FRAME_RATE, ctx->fpsNum, ctx->fpsDen);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(outputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    if (SUCCEEDED(hr)) hr = outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (SUCCEEDED(hr)) hr = outputType->SetUINT32(MF_MT_AVG_BITRATE, ctx->bitrate);
+    if (SUCCEEDED(hr)) hr = ctx->transform->SetOutputType(0, outputType, 0);
+    if (FAILED(hr)) {
+        SafeRelease(&outputType);
+        SafeRelease(&ctx->transform);
+        return hr;
+    }
+    ctx->outputType = outputType;
+
+    IMFMediaType *inputType = nullptr;
+    hr = MFCreateMediaType(&inputType);
+    if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    if (SUCCEEDED(hr)) hr = inputType->SetGUID(MF_MT_SUBTYPE, inputSubtype);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, width, height);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, ctx->fpsNum, ctx->fpsDen);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(inputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    if (SUCCEEDED(hr)) hr = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (SUCCEEDED(hr)) hr = ctx->transform->SetInputType(0, inputType, 0);
+    if (FAILED(hr)) {
+        SafeRelease(&inputType);
+        SafeRelease(&ctx->outputType);
+        SafeRelease(&ctx->transform);
+        return hr;
+    }
+    ctx->inputType = inputType;
+
+    if (SUCCEEDED(ctx->transform->QueryInterface(IID_ICodecAPI, reinterpret_cast<void **>(&ctx->codecApi))) && ctx->codecApi != nullptr) {
+        const UINT32 fps = ctx->fpsDen != 0 ? std::max<UINT32>(1, (ctx->fpsNum + ctx->fpsDen - 1) / ctx->fpsDen) : 30U;
+        VARIANT value;
+        VariantInit(&value);
+
+        value.vt = VT_UI4;
+        value.ulVal = eAVEncCommonRateControlMode_CBR;
+        ctx->codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &value);
+
+        value.ulVal = ctx->bitrate;
+        ctx->codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value);
+
+        value.ulVal = fps;
+        ctx->codecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &value);
+
+        value.ulVal = 0;
+        ctx->codecApi->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &value);
+
+        value.ulVal = 1;
+        ctx->codecApi->SetValue(&CODECAPI_AVLowLatencyMode, &value);
+
+        VariantClear(&value);
+    }
+
+    hr = LoadCodecConfig(ctx->outputType, MFVideoFormat_H264, &ctx->codecConfig, &ctx->nalLengthSize);
+    if (FAILED(hr)) {
+        ctx->codecConfig.clear();
+        ctx->nalLengthSize = 4;
+    }
+
+    hr = ctx->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    if (SUCCEEDED(hr)) hr = ctx->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (SUCCEEDED(hr)) ctx->streamingBegun = true;
+    if (FAILED(hr)) {
+        SafeRelease(&ctx->inputType);
+        SafeRelease(&ctx->outputType);
+        SafeRelease(&ctx->transform);
+    }
+    return hr;
+}
+
+void CloseH264Encoder(H264EncoderContext *ctx) {
+    if (ctx == nullptr) {
+        return;
+    }
+    if (ctx->transform != nullptr && ctx->streamingBegun) {
+        ctx->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        ctx->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        ctx->transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    }
+    SafeRelease(&ctx->codecApi);
+    SafeRelease(&ctx->inputType);
+    SafeRelease(&ctx->outputType);
+    SafeRelease(&ctx->transform);
+    ctx->codecConfig.clear();
+    ctx->streamingBegun = false;
+}
+
+HRESULT EncodeH264Sample(H264EncoderContext *ctx, IMFSample *inputSample, std::vector<EncodedPacket> *packetsOut) {
+    if (ctx == nullptr || ctx->transform == nullptr || inputSample == nullptr || packetsOut == nullptr) {
+        return E_POINTER;
+    }
+    if (ctx->codecApi != nullptr) {
+        LONGLONG sampleTime = 0;
+        if (SUCCEEDED(inputSample->GetSampleTime(&sampleTime))) {
+            const LONGLONG interval100ns = 10 * 1000 * 1000;
+            if (ctx->nextForcedKeyframeTime == 0 || sampleTime >= ctx->nextForcedKeyframeTime) {
+                VARIANT value;
+                VariantInit(&value);
+                value.vt = VT_UI4;
+                value.ulVal = 1;
+                ctx->codecApi->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value);
+                VariantClear(&value);
+                ctx->nextForcedKeyframeTime = sampleTime + interval100ns;
+            }
+        }
+    }
+    HRESULT hr = ctx->transform->ProcessInput(0, inputSample, 0);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    for (;;) {
+        MFT_OUTPUT_STREAM_INFO streamInfo = {};
+        hr = ctx->transform->GetOutputStreamInfo(0, &streamInfo);
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        IMFSample *outputSample = nullptr;
+        IMFMediaBuffer *outputBuffer = nullptr;
+        hr = MFCreateSample(&outputSample);
+        if (FAILED(hr)) {
+            return hr;
+        }
+        hr = MFCreateMemoryBuffer(streamInfo.cbSize > 0 ? streamInfo.cbSize : 1024 * 1024, &outputBuffer);
+        if (SUCCEEDED(hr)) {
+            hr = outputSample->AddBuffer(outputBuffer);
+        }
+        SafeRelease(&outputBuffer);
+        if (FAILED(hr)) {
+            SafeRelease(&outputSample);
+            return hr;
+        }
+
+        MFT_OUTPUT_DATA_BUFFER output = {};
+        output.dwStreamID = 0;
+        output.pSample = outputSample;
+        DWORD status = 0;
+        hr = ctx->transform->ProcessOutput(0, 1, &output, &status);
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            SafeRelease(&outputSample);
+            return S_OK;
+        }
+        if (FAILED(hr)) {
+            SafeRelease(&outputSample);
+            return hr;
+        }
+
+        IMFMediaBuffer *buffer = nullptr;
+        hr = outputSample->ConvertToContiguousBuffer(&buffer);
+        if (SUCCEEDED(hr) && buffer != nullptr) {
+            BYTE *raw = nullptr;
+            DWORD maxLen = 0;
+            DWORD curLen = 0;
+            hr = buffer->Lock(&raw, &maxLen, &curLen);
+            if (SUCCEEDED(hr)) {
+                UINT32 cleanPoint = 0;
+                bool isKeyFrame = outputSample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint) == S_OK && cleanPoint != 0;
+                EncodedPacket packet = {};
+                packet.annexb = ToAnnexB(raw, curLen, ctx->nalLengthSize, ctx->codecConfig, isKeyFrame);
+                outputSample->GetSampleTime(&packet.sampleTime);
+                if (!packet.annexb.empty()) {
+                    packetsOut->push_back(std::move(packet));
+                }
+                buffer->Unlock();
+            }
+        }
+        SafeRelease(&buffer);
+        SafeRelease(&outputSample);
+    }
+}
+
 DWORD WINAPI CaptureThreadMain(LPVOID param) {
     WinCapture *capture = static_cast<WinCapture *>(param);
     HRESULT hr = MfStartupScoped();
@@ -427,6 +976,9 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
     std::vector<std::vector<uint8_t>> codecConfig;
     uint32_t nalLengthSize = 4;
     GUID subtype = MFVideoFormat_H264;
+    bool useEncoder = false;
+    RawOutputSelection rawSelection = {};
+    H264EncoderContext encoder = {};
 
     do {
         hr = FindDevice(capture->device, &device);
@@ -460,24 +1012,43 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
 
         MediaTypeSelection selection = {};
         subtype = (_wcsicmp(capture->codec.c_str(), L"h265") == 0) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
-        hr = SelectCompressedMediaType(reader, subtype, capture->fps, &selection);
+        hr = SelectCompressedMediaType(reader, subtype, capture->width, capture->height, capture->fps, &selection);
         if (FAILED(hr)) {
-            capture->error = WideToUtf8String(L"device does not expose native " + capture->codec + L" output");
-            break;
-        }
+            if (!GuidEqual(subtype, MFVideoFormat_H264)) {
+                capture->error = WideToUtf8String(L"device does not expose native " + capture->codec + L" output");
+                break;
+            }
+            hr = SelectRawMediaType(reader, capture->width, capture->height, capture->fps, &rawSelection);
+            if (FAILED(hr)) {
+                capture->error = WideToUtf8String(L"device does not expose native h264 and no suitable raw output was found");
+                break;
+            }
+            hr = SetReaderRawOutputType(reader, rawSelection);
+            if (FAILED(hr)) {
+                capture->error = WideToUtf8String(CaptureErrorMessage(hr, "set raw media type"));
+                break;
+            }
+            UINT32 bitrate = capture->bitrateKbps > 0 ? static_cast<UINT32>(capture->bitrateKbps) * 1000U : 0U;
+            hr = CreateH264Encoder(rawSelection.width, rawSelection.height, rawSelection.fpsNum, rawSelection.fpsDen, bitrate, rawSelection.outputSubtype, &encoder);
+            if (FAILED(hr)) {
+                capture->error = WideToUtf8String(CaptureErrorMessage(hr, "create h264 encoder"));
+                break;
+            }
+            useEncoder = true;
+        } else {
+            hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, selection.type);
+            if (FAILED(hr)) {
+                SafeRelease(&selection.type);
+                capture->error = WideToUtf8String(CaptureErrorMessage(hr, "set current media type"));
+                break;
+            }
+            currentType = selection.type;
 
-        hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, selection.type);
-        if (FAILED(hr)) {
-            SafeRelease(&selection.type);
-            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "set current media type"));
-            break;
-        }
-        currentType = selection.type;
-
-        hr = LoadCodecConfig(currentType, subtype, &codecConfig, &nalLengthSize);
-        if (FAILED(hr)) {
-            codecConfig.clear();
-            nalLengthSize = 4;
+            hr = LoadCodecConfig(currentType, subtype, &codecConfig, &nalLengthSize);
+            if (FAILED(hr)) {
+                codecConfig.clear();
+                nalLengthSize = 4;
+            }
         }
 
         capture->started = true;
@@ -511,12 +1082,31 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
                 DWORD curLen = 0;
                 hr = buffer->Lock(&raw, &maxLen, &curLen);
                 if (SUCCEEDED(hr)) {
-                    UINT32 cleanPoint = 0;
-                    bool isKeyFrame = sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint) == S_OK && cleanPoint != 0;
-                    std::vector<uint8_t> annexb = ToAnnexB(raw, curLen, nalLengthSize, codecConfig, isKeyFrame);
-                    if (!annexb.empty()) {
-                        uint32_t pts90k = static_cast<uint32_t>((sampleTime * 9) / 1000);
-                        WebrtpUsbWinPacket(capture->handle, annexb.data(), static_cast<int>(annexb.size()), pts90k);
+                    if (useEncoder) {
+                        std::vector<EncodedPacket> packets;
+                        hr = EncodeH264Sample(&encoder, sample, &packets);
+                        if (FAILED(hr)) {
+                            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "encode h264 sample"));
+                            buffer->Unlock();
+                            SafeRelease(&buffer);
+                            SafeRelease(&sample);
+                            WebrtpUsbWinError(capture->handle, StringDup(capture->error));
+                            break;
+                        }
+                        for (const auto &packet : packets) {
+                            if (!packet.annexb.empty()) {
+                                uint32_t pts90k = static_cast<uint32_t>((packet.sampleTime * 9) / 1000);
+                                WebrtpUsbWinPacket(capture->handle, const_cast<uint8_t *>(packet.annexb.data()), static_cast<int>(packet.annexb.size()), pts90k);
+                            }
+                        }
+                    } else {
+                        UINT32 cleanPoint = 0;
+                        bool isKeyFrame = sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint) == S_OK && cleanPoint != 0;
+                        std::vector<uint8_t> annexb = ToAnnexB(raw, curLen, nalLengthSize, codecConfig, isKeyFrame);
+                        if (!annexb.empty()) {
+                            uint32_t pts90k = static_cast<uint32_t>((sampleTime * 9) / 1000);
+                            WebrtpUsbWinPacket(capture->handle, annexb.data(), static_cast<int>(annexb.size()), pts90k);
+                        }
                     }
                     buffer->Unlock();
                 }
@@ -532,6 +1122,7 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
 
     SafeRelease(&currentType);
     SafeRelease(&reader);
+    CloseH264Encoder(&encoder);
     if (source != nullptr) {
         source->Shutdown();
     }
@@ -543,7 +1134,7 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
 
 }  // namespace
 
-extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, double fps, uintptr_t handle, char **errOut) {
+extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
     WinCapture *capture = new WinCapture();
     capture->thread = nullptr;
     capture->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -551,7 +1142,10 @@ extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec,
     capture->handle = handle;
     capture->device = Utf8ToWide(device);
     capture->codec = Utf8ToWide(codec);
+    capture->width = width;
+    capture->height = height;
     capture->fps = fps;
+    capture->bitrateKbps = bitrateKbps;
     capture->started = false;
 
     if (capture->stopEvent == nullptr || capture->readyEvent == nullptr) {
@@ -623,6 +1217,38 @@ extern "C" char *WebrtpUsbWinDeviceList(char **errOut) {
     if (FAILED(hr)) {
         if (errOut != nullptr) {
             *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "list usb devices"));
+        }
+        return nullptr;
+    }
+    return StringDup(result);
+}
+
+extern "C" char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOut) {
+    HRESULT hr = MfStartupScoped();
+    if (FAILED(hr)) {
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "initialize media foundation"));
+        }
+        return nullptr;
+    }
+
+    IMFActivate *found = nullptr;
+    hr = FindDevice(Utf8ToWide(device), &found);
+    if (FAILED(hr)) {
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "find usb device"));
+        }
+        MfShutdownScoped();
+        return nullptr;
+    }
+
+    std::string result;
+    hr = DeviceCapabilitiesJson(found, &result);
+    SafeRelease(&found);
+    MfShutdownScoped();
+    if (FAILED(hr)) {
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "query usb capabilities"));
         }
         return nullptr;
     }

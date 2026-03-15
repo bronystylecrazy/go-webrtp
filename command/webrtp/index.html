@@ -223,6 +223,13 @@
         }
 
         makeDecoder(codec, description) {
+            if (typeof VideoDecoder === 'undefined') {
+                const reason = window.isSecureContext
+                    ? 'WebCodecs VideoDecoder is not available in this browser.'
+                    : 'WebCodecs VideoDecoder requires a secure context. Open this page via https:// or http://localhost.';
+                console.error(reason);
+                throw new Error(reason);
+            }
             if (this.decoder && this.decoder.state !== 'closed') {
                 try {
                     this.decoder.close();
@@ -314,8 +321,11 @@
     let players = {};
     let currentPage = 0;
     let infoWs = null;
+    let devicesWs = null;
     let infoReconnectTimer = null;
+    let devicesReconnectTimer = null;
     let infoReconnectDelay = 1000;
+    let devicesReconnectDelay = 1000;
     const grid = document.getElementById('grid');
     const pagination = document.getElementById('pagination');
 
@@ -372,6 +382,18 @@
         return `${formatBytes(bytesPerSecond)}/s`;
     }
 
+    function liveStats(stream) {
+        const stats = stream?.stats || {};
+        return {
+            codec: stats.codec || stream?.codec || '—',
+            width: Number(stats.width || stream?.width || 0),
+            height: Number(stats.height || stream?.height || 0),
+            framerate: Number(stats.framerate || stream?.frameRate || 0),
+            bitrateKbps: Number(stats.bitrateKbps || stream?.bitrateKbps || 0),
+            frameNo: Number(stats.frameNo || 0),
+        };
+    }
+
     function streamSignature(items) {
         return (items || []).map((stream) => stream.name).join('|');
     }
@@ -417,6 +439,41 @@
         };
     }
 
+    function connectDevicesSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+        devicesWs = new WebSocket(`${protocol}://${location.host}/ws/devices`);
+        devicesWs.onopen = () => {
+            devicesReconnectDelay = 1000;
+        };
+        devicesWs.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                if (message.error) {
+                    console.error('devices socket error:', message.error);
+                    return;
+                }
+                (message.added || []).forEach((device) => {
+                    console.log('device connected:', device);
+                });
+                (message.removed || []).forEach((device) => {
+                    console.log('device disconnected:', device);
+                });
+            } catch (e) {
+                console.error('devices socket parse:', e);
+            }
+        };
+        devicesWs.onclose = () => {
+            clearTimeout(devicesReconnectTimer);
+            devicesReconnectTimer = setTimeout(connectDevicesSocket, devicesReconnectDelay);
+            devicesReconnectDelay = Math.min(devicesReconnectDelay * 2, 5000);
+        };
+        devicesWs.onerror = () => {
+            if (devicesWs && (devicesWs.readyState === WebSocket.OPEN || devicesWs.readyState === WebSocket.CONNECTING)) {
+                devicesWs.close();
+            }
+        };
+    }
+
     function renderGrid() {
         // Close existing players
         Object.values(players).forEach(p => p.close());
@@ -437,6 +494,7 @@
 
             if (idx < streams.length) {
                 const stream = streams[idx];
+                const stats = liveStats(stream);
                 cell.dataset.index = idx;
 
                 const canvas = document.createElement('canvas');
@@ -447,12 +505,12 @@
                 overlay.className = 'cell-overlay';
                 overlay.innerHTML = `<div class="cell-name">${stream.name}</div>
                 <div class="cell-meta">
-                    <span>${stream.codec || '—'}</span>
-                    <span>${stream.width || 0}x${stream.height || 0}</span>
-                    <span>${Math.round(stream.framerate || 0)}fps</span>
-                    <span class="bitrate">${Math.round(stream.bitrateKbps || 0)}kbps</span>
-                    <span class="bytes">${formatRateFromKbps(stream.bitrateKbps || 0)}</span>
-                    <span class="frame-no">#0</span>
+                    <span>${stats.codec}</span>
+                    <span>${stats.width}x${stats.height}</span>
+                    <span>${Math.round(stats.framerate)}fps</span>
+                    <span class="bitrate">${Math.round(stats.bitrateKbps)}kbps</span>
+                    <span class="bytes">${formatRateFromKbps(stats.bitrateKbps)}</span>
+                    <span class="frame-no">#${stats.frameNo}</span>
                 </div>`;
                 cell.appendChild(overlay);
 
@@ -486,17 +544,18 @@
             if (!cell) continue;
 
             const stream = streams[i];
+            const stats = liveStats(stream);
             const meta = cell.querySelector('.cell-meta');
             if (!meta) continue;
 
-            const frameNo = meta.querySelector('.frame-no')?.textContent || '#0';
+            const currentFrameNo = meta.querySelector('.frame-no')?.textContent || `#${stats.frameNo}`;
             meta.innerHTML = `
-                <span>${stream.codec || '—'}</span>
-                <span>${stream.width || 0}x${stream.height || 0}</span>
-                <span>${Math.round(stream.framerate || 0)}fps</span>
-                <span class="bitrate">${Math.round(stream.bitrateKbps || 0)}kbps</span>
-                <span class="bytes">${formatRateFromKbps(stream.bitrateKbps || 0)}</span>
-                <span class="frame-no">${frameNo}</span>
+                <span>${stats.codec}</span>
+                <span>${stats.width}x${stats.height}</span>
+                <span>${Math.round(stats.framerate)}fps</span>
+                <span class="bitrate">${Math.round(stats.bitrateKbps)}kbps</span>
+                <span class="bytes">${formatRateFromKbps(stats.bitrateKbps)}</span>
+                <span class="frame-no">${currentFrameNo}</span>
             `;
         }
     }
@@ -541,6 +600,7 @@
     });
 
     connectInfoSocket();
+    connectDevicesSocket();
 
     lucide.createIcons();
 </script>

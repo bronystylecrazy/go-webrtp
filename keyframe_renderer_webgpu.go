@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build cgo && windows
 
 package webrtp
 
@@ -289,8 +289,9 @@ func (r *webGPUKeyframeRenderer) Render(img image.Image, fx, fy, scale float64, 
 	var finalTexture *wgpu.Texture
 	var finalView *wgpu.TextureView
 	if len(desk) == 4 {
-		targetWidth, targetHeight = deskOutputSize(srcWidth, srcHeight, desk)
-		h, err := deskHomography(srcWidth, srcHeight, desk, targetWidth, targetHeight)
+		rectifiedDesk := remapDeskToUndistorted(desk, fx, fy, scale)
+		targetWidth, targetHeight = deskOutputSize(srcWidth, srcHeight, rectifiedDesk)
+		h, err := deskHomography(srcWidth, srcHeight, rectifiedDesk, targetWidth, targetHeight)
 		if err != nil {
 			return nil, stats, err
 		}

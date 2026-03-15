@@ -1,9 +1,10 @@
-//go:build cgo
+//go:build !cgo || !windows
 
 package webrtp
 
 import "fmt"
 
 func newWebGPUKeyframeRenderer(logger Logger) (keyframeRenderer, error) {
-	return nil, fmt.Errorf("webgpu renderer requires a CGO-disabled build; using cpu renderer instead")
+	_ = logger
+	return nil, fmt.Errorf("webgpu renderer requires CGO-enabled build; using cpu renderer instead")
 }

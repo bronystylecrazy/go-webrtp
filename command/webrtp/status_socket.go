@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/connectedtechco/go-webrtp"
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 )
@@ -37,17 +39,39 @@ type DashboardSocketMessage struct {
 	Rows []*DashboardRow `json:"rows"`
 }
 
+type DeviceSocketMessage struct {
+	Devices []*webrtp.UsbDevice `json:"devices"`
+	Added   []*webrtp.UsbDevice `json:"added,omitempty"`
+	Removed []*webrtp.UsbDevice `json:"removed,omitempty"`
+	Error   string              `json:"error,omitempty"`
+}
+
 type DeskViewSyncMessage struct {
-	Name        string  `json:"name"`
-	Quality     string  `json:"quality,omitempty"`
-	Distort     bool    `json:"distort"`
-	GridEnabled bool    `json:"gridEnabled"`
-	DeskEnabled bool    `json:"deskEnabled"`
-	FX          float64 `json:"fx"`
-	FY          float64 `json:"fy"`
-	Scale       float64 `json:"scale"`
-	Desk        string  `json:"desk,omitempty"`
-	Guides      string  `json:"guides,omitempty"`
+	Name          string                `json:"name"`
+	Quality       string                `json:"quality,omitempty"`
+	Distort       bool                  `json:"distort"`
+	GridEnabled   bool                  `json:"gridEnabled"`
+	DeskEnabled   bool                  `json:"deskEnabled"`
+	FX            float64               `json:"fx"`
+	FY            float64               `json:"fy"`
+	Scale         float64               `json:"scale"`
+	Desk          string                `json:"desk,omitempty"`
+	Guides        string                `json:"guides,omitempty"`
+	TableHeightMM float64               `json:"tableHeightMM,omitempty"`
+	TableWidthMM  float64               `json:"tableWidthMM,omitempty"`
+	BBoxs         []*DeskViewBBoxRecord `json:"bboxs,omitempty"`
+}
+
+type DeskViewBBoxRecord struct {
+	ID           int     `json:"id"`
+	TableID      int     `json:"tableId"`
+	ColorKey     *string `json:"colorKey"`
+	DirectionKey *string `json:"directionKey"`
+	X1           float64 `json:"x1"`
+	Y1           float64 `json:"y1"`
+	X2           float64 `json:"x2"`
+	Y2           float64 `json:"y2"`
+	WireColorKey *string `json:"wireColorKey"`
 }
 
 type DeskViewSocketBroker struct {
@@ -265,4 +289,120 @@ func DashboardSocketHandler(manager *StreamManager) fiber.Handler {
 			}
 		})(c)
 	}
+}
+
+func DeviceSocketHandler() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
+		}
+		return websocket.New(func(conn *websocket.Conn) {
+			defer conn.Close()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+				}
+			}()
+
+			lastDevices := make(map[string]*webrtp.UsbDevice)
+			sendDevices := func(force bool) error {
+				devices, err := webrtp.UsbDeviceList()
+				message := &DeviceSocketMessage{}
+				if err != nil {
+					message.Error = err.Error()
+				} else {
+					sanitized := sanitizeUsbDevices(devices)
+					sortUsbDevices(sanitized)
+					current := usbDeviceMap(sanitized)
+					added := usbDeviceDelta(current, lastDevices)
+					removed := usbDeviceDelta(lastDevices, current)
+					if !force && len(added) == 0 && len(removed) == 0 {
+						lastDevices = current
+						return nil
+					}
+					message.Devices = sanitized
+					message.Added = added
+					message.Removed = removed
+					lastDevices = current
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				return conn.WriteJSON(message)
+			}
+
+			if err := sendDevices(true); err != nil {
+				return
+			}
+
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					if err := sendDevices(false); err != nil {
+						return
+					}
+				}
+			}
+		})(c)
+	}
+}
+
+func usbDeviceMap(devices []*webrtp.UsbDevice) map[string]*webrtp.UsbDevice {
+	items := make(map[string]*webrtp.UsbDevice, len(devices))
+	for _, device := range devices {
+		if device == nil || device.Id == "" {
+			continue
+		}
+		clone := *device
+		items[device.Id] = &clone
+	}
+	return items
+}
+
+func usbDeviceDelta(current, previous map[string]*webrtp.UsbDevice) []*webrtp.UsbDevice {
+	items := make([]*webrtp.UsbDevice, 0)
+	for id, device := range current {
+		if _, ok := previous[id]; ok {
+			continue
+		}
+		clone := *device
+		items = append(items, &clone)
+	}
+	sortUsbDevices(items)
+	return items
+}
+
+func sortUsbDevices(devices []*webrtp.UsbDevice) {
+	slices.SortFunc(devices, func(a, b *webrtp.UsbDevice) int {
+		if a == nil && b == nil {
+			return 0
+		}
+		if a == nil {
+			return 1
+		}
+		if b == nil {
+			return -1
+		}
+		if a.Name == b.Name {
+			switch {
+			case a.Id < b.Id:
+				return -1
+			case a.Id > b.Id:
+				return 1
+			default:
+				return 0
+			}
+		}
+		if a.Name < b.Name {
+			return -1
+		}
+		return 1
+	})
 }

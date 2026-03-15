@@ -43,7 +43,7 @@ client.start()
 
 ### MQTT Keyframe Viewer
 
-When `keyframeSink` includes `mqtt`, the broker receives raw `jpg`/`png`
+When `keyframeSink` includes `mqtt`, the broker can receive wrapped `jpg`
 payloads on the configured topic. View them with:
 
 ```bash

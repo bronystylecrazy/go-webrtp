@@ -12,14 +12,16 @@ typedef void *WebrtpUsbWinCaptureRef;
 extern void WebrtpUsbWinPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
 extern void WebrtpUsbWinError(uintptr_t handle, char *msg);
 
-WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *codec, double fps, uintptr_t handle, char **errOut);
+WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
 void WebrtpUsbWinCaptureStop(WebrtpUsbWinCaptureRef ref);
 char *WebrtpUsbWinDeviceList(char **errOut);
+char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOut);
 */
 import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -83,7 +85,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	defer C.free(unsafe.Pointer(cCodec))
 
 	var cErr *C.char
-	ref := C.WebrtpUsbWinCaptureStart(cDevice, cCodec, C.double(r.cfg.FrameRate), C.uintptr_t(handle), &cErr)
+	ref := C.WebrtpUsbWinCaptureStart(cDevice, cCodec, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(r.cfg.FrameRate), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
 	if ref == nil {
 		usbRegistry.Delete(handle)
 		cancel()
@@ -184,4 +186,27 @@ func UsbDeviceList() ([]*UsbDevice, error) {
 		return 1
 	})
 	return devices, nil
+}
+
+func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
+	cDevice := C.CString(device)
+	defer C.free(unsafe.Pointer(cDevice))
+
+	var cErr *C.char
+	result := C.WebrtpUsbWinDeviceCapabilities(cDevice, &cErr)
+	if result == nil {
+		if cErr != nil {
+			defer C.free(unsafe.Pointer(cErr))
+			return nil, fmt.Errorf("usb capabilities: %s", C.GoString(cErr))
+		}
+		return nil, fmt.Errorf("usb capabilities: unknown error")
+	}
+	defer C.free(unsafe.Pointer(result))
+
+	caps := &UsbDeviceCapabilities{}
+	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
+		return nil, fmt.Errorf("parse usb capabilities: %w", err)
+	}
+	populateSuggestedUsbRenditions(caps)
+	return caps, nil
 }

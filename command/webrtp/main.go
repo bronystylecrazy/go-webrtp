@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,7 +33,7 @@ import (
 //go:embed index.html
 var indexHtml []byte
 
-//go:embed index.css
+//go:embed index.scss
 var indexCss []byte
 
 //go:embed stream.html
@@ -38,6 +41,13 @@ var streamHtml []byte
 
 //go:embed dashboard.html
 var dashboardHtml []byte
+
+var (
+	buildVersion  = "dev"
+	buildCommit   = "unknown"
+	buildTime     = ""
+	serverStarted = time.Now()
+)
 
 var CLI struct {
 	Config         string `help:"Config file path" short:"c" default:"config.yml"`
@@ -76,9 +86,12 @@ type Upstream struct {
 }
 
 type Rendition struct {
-	Name        string `yaml:"name" json:"name"`
-	BitrateKbps int    `yaml:"bitrateKbps" json:"bitrateKbps"`
-	OnDemand    *bool  `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
+	Name        string   `yaml:"name" json:"name"`
+	Width       *int     `yaml:"width,omitempty" json:"width,omitempty"`
+	Height      *int     `yaml:"height,omitempty" json:"height,omitempty"`
+	FrameRate   *float64 `yaml:"frameRate,omitempty" json:"frameRate,omitempty"`
+	BitrateKbps *int     `yaml:"bitrateKbps,omitempty" json:"bitrateKbps,omitempty"`
+	OnDemand    *bool    `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
 }
 
 type Stream struct {
@@ -116,6 +129,29 @@ type RecordResponse struct {
 	Recording webrtp.RecordingStatus `json:"recording"`
 }
 
+type DeviceCapabilitiesResponse struct {
+	Device       *webrtp.UsbDevice             `json:"device,omitempty"`
+	Capabilities *webrtp.UsbDeviceCapabilities `json:"capabilities,omitempty"`
+}
+
+type HealthResponse struct {
+	Status        string        `json:"status"`
+	StartedAt     time.Time     `json:"startedAt"`
+	Uptime        time.Duration `json:"uptime"`
+	Streams       int           `json:"streams"`
+	Enabled       int           `json:"enabled"`
+	Served        int           `json:"served"`
+	ActiveClients int           `json:"activeClients"`
+}
+
+type VersionResponse struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildTime string `json:"buildTime,omitempty"`
+	GoVersion string `json:"goVersion"`
+	Platform  string `json:"platform"`
+}
+
 type Model struct {
 	manager      *StreamManager
 	page         int
@@ -125,6 +161,88 @@ type Model struct {
 	quitting     bool
 	windowWidth  int
 	windowHeight int
+}
+
+type deskViewBBoxPublishPayload struct {
+	TableHeightMM float64               `json:"tableHeightMM"`
+	TableWidthMM  float64               `json:"tableWidthMM"`
+	BBoxs         []*DeskViewBBoxRecord `json:"bboxs"`
+}
+
+func normalizeDeskViewBBoxPayload(msg *DeskViewSyncMessage) (string, []byte, error) {
+	if msg == nil {
+		return "", nil, nil
+	}
+	payload := &deskViewBBoxPublishPayload{
+		TableHeightMM: msg.TableHeightMM,
+		TableWidthMM:  msg.TableWidthMM,
+		BBoxs:         make([]*DeskViewBBoxRecord, 0, len(msg.BBoxs)),
+	}
+	topicTableID := 0
+	for _, box := range msg.BBoxs {
+		if box == nil {
+			continue
+		}
+		item := &DeskViewBBoxRecord{
+			ID:           box.ID,
+			TableID:      box.TableID,
+			ColorKey:     normalizeBBoxKey(box.ColorKey, "B", "G", "GR", "R", "W", "Y"),
+			DirectionKey: normalizeBBoxKey(box.DirectionKey, "L", "R", "T", "B"),
+			X1:           clamp01(box.X1),
+			Y1:           clamp01(box.Y1),
+			X2:           clamp01(box.X2),
+			Y2:           clamp01(box.Y2),
+			WireColorKey: normalizeBBoxKey(box.WireColorKey, "GR", "BL"),
+		}
+		if item.X2 < item.X1 {
+			item.X1, item.X2 = item.X2, item.X1
+		}
+		if item.Y2 < item.Y1 {
+			item.Y1, item.Y2 = item.Y2, item.Y1
+		}
+		if topicTableID == 0 && item.TableID > 0 {
+			topicTableID = item.TableID
+		}
+		payload.BBoxs = append(payload.BBoxs, item)
+	}
+	if len(payload.BBoxs) == 0 && payload.TableHeightMM == 0 && payload.TableWidthMM == 0 {
+		return "", nil, nil
+	}
+	if topicTableID <= 0 {
+		topicTableID = 1
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil, err
+	}
+	return fmt.Sprintf("/v1/tables/%d/inspections/request", topicTableID), body, nil
+}
+
+func normalizeBBoxKey(raw *string, allowed ...string) *string {
+	if raw == nil {
+		return nil
+	}
+	value := strings.ToUpper(strings.TrimSpace(*raw))
+	if value == "" {
+		return nil
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			out := candidate
+			return &out
+		}
+	}
+	return nil
+}
+
+func clamp01(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -446,6 +564,92 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func hashDeviceID(raw string) string {
+	sum := sha1.Sum([]byte(raw))
+	return fmt.Sprintf("%x", sum)
+}
+
+func sanitizeUsbDevice(device *webrtp.UsbDevice) *webrtp.UsbDevice {
+	if device == nil {
+		return nil
+	}
+	return &webrtp.UsbDevice{
+		Id:   hashDeviceID(device.Id),
+		Name: device.Name,
+	}
+}
+
+func sanitizeUsbDevices(devices []*webrtp.UsbDevice) []*webrtp.UsbDevice {
+	items := make([]*webrtp.UsbDevice, 0, len(devices))
+	for _, device := range devices {
+		if sanitized := sanitizeUsbDevice(device); sanitized != nil {
+			items = append(items, sanitized)
+		}
+	}
+	return items
+}
+
+func resolveHashedDeviceID(id string) (string, error) {
+	devices, err := webrtp.UsbDeviceList()
+	if err != nil {
+		return "", err
+	}
+	for _, device := range devices {
+		if device == nil {
+			continue
+		}
+		if device.Id == id || hashDeviceID(device.Id) == id {
+			return device.Id, nil
+		}
+	}
+	return "", fiber.ErrNotFound
+}
+
+func apiDeviceCapabilities(deviceID string) (*DeviceCapabilitiesResponse, error) {
+	rawID, err := resolveHashedDeviceID(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	caps, err := webrtp.UsbDeviceCapabilitiesGet(rawID)
+	if err != nil {
+		return nil, err
+	}
+	resp := &DeviceCapabilitiesResponse{
+		Capabilities: caps,
+	}
+	if caps != nil && caps.Device != nil {
+		resp.Device = sanitizeUsbDevice(caps.Device)
+	} else {
+		resp.Device = &webrtp.UsbDevice{Id: hashDeviceID(rawID), Name: rawID}
+	}
+	if resp.Capabilities != nil && resp.Capabilities.Device != nil {
+		resp.Capabilities.Device = sanitizeUsbDevice(resp.Capabilities.Device)
+	}
+	return resp, nil
+}
+
+func apiHealth(manager *StreamManager) *HealthResponse {
+	streams := manager.StreamStatusList()
+	resp := &HealthResponse{
+		Status:    "ok",
+		StartedAt: serverStarted,
+		Uptime:    time.Since(serverStarted).Round(time.Second),
+		Streams:   len(streams),
+	}
+	for _, stream := range streams {
+		if stream.Enabled {
+			resp.Enabled++
+		}
+		if stream.ServeStream {
+			resp.Served++
+		}
+		if stream.Stats != nil {
+			resp.ActiveClients += int(stream.Stats.ClientCount)
+		}
+	}
+	return resp
+}
+
 func main() {
 	kong.Parse(&CLI)
 
@@ -517,8 +721,45 @@ func main() {
 		StreamResponsesSort(items)
 		return c.JSON(items)
 	})
+	app.Get("/api/devices", func(c fiber.Ctx) error {
+		items, err := webrtp.UsbDeviceList()
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(sanitizeUsbDevices(items))
+	})
+	app.Get("/api/devices/:id/capabilities", func(c fiber.Ctx) error {
+		item, err := apiDeviceCapabilities(c.Params("id"))
+		if err != nil {
+			if err == fiber.ErrNotFound {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Get("/api/recordings", func(c fiber.Ctx) error {
+		items, err := RecordingsList("recordings")
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+		}
+		return c.JSON(items)
+	})
+	app.Get("/api/health", func(c fiber.Ctx) error {
+		return c.JSON(apiHealth(manager))
+	})
+	app.Get("/api/version", func(c fiber.Ctx) error {
+		return c.JSON(&VersionResponse{
+			Version:   buildVersion,
+			Commit:    buildCommit,
+			BuildTime: buildTime,
+			GoVersion: runtime.Version(),
+			Platform:  runtime.GOOS + "/" + runtime.GOARCH,
+		})
+	})
 	app.All("/ws/info", StatusSocketHandler(manager))
 	app.All("/ws/dashboard", DashboardSocketHandler(manager))
+	app.All("/ws/devices", DeviceSocketHandler())
 	app.All("/ws/deskview", DeskViewSocketHandler(deskViewBroker))
 	app.Post("/api/streams", func(c fiber.Ctx) error {
 		req := &StreamApiRequest{}
@@ -535,6 +776,46 @@ func main() {
 		item, ok := manager.StreamStatus(c.Params("name"))
 		if !ok {
 			return fiber.ErrNotFound
+		}
+		return c.JSON(item)
+	})
+	app.Post("/api/streams/:name/enable", func(c fiber.Ctx) error {
+		item, err := manager.StreamSetEnabled(c.Params("name"), true)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Post("/api/streams/:name/disable", func(c fiber.Ctx) error {
+		item, err := manager.StreamSetEnabled(c.Params("name"), false)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Post("/api/streams/:name/start", func(c fiber.Ctx) error {
+		item, err := manager.StreamStart(c.Params("name"), c.Query("quality"))
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(item)
+	})
+	app.Post("/api/streams/:name/stop", func(c fiber.Ctx) error {
+		item, err := manager.StreamStop(c.Params("name"), c.Query("quality"))
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return fiber.ErrNotFound
+			}
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		return c.JSON(item)
 	})
@@ -572,8 +853,17 @@ func main() {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		for _, stream := range targets {
-			if err := stream.Inst.UpdateKeyframeCalibration(req.FX, req.FY, req.Scale, req.Desk); err != nil {
+			if err := stream.Inst.UpdateKeyframeCalibration(req.Distort, req.DeskEnabled, req.FX, req.FY, req.Scale, req.Desk); err != nil {
 				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+			topic, payload, err := normalizeDeskViewBBoxPayload(req)
+			if err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+			if len(payload) > 0 {
+				if err := stream.Inst.PublishDeskViewMetadata(topic, payload); err != nil {
+					return fiber.NewError(fiber.StatusBadRequest, err.Error())
+				}
 			}
 		}
 		return c.SendStatus(fiber.StatusNoContent)
