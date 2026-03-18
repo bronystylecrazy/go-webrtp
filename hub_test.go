@@ -1,6 +1,12 @@
 package webrtp
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
 
 func TestHubStartupSnapshotCachesLatestGOP(t *testing.T) {
 	hub := NewHub()
@@ -76,5 +82,61 @@ func TestHubSubscribeWithStartupSnapshotQueuesOnlyNewerFrames(t *testing.T) {
 	next := <-ch
 	if next.FrameNo <= startupFrames[len(startupFrames)-1].FrameNo {
 		t.Fatalf("expected only newer live frames, got frame %d after startup frame %d", next.FrameNo, startupFrames[len(startupFrames)-1].FrameNo)
+	}
+}
+
+func TestProcessAuRecordsEachSampleOnce(t *testing.T) {
+	tmpDir := t.TempDir()
+	recordPath := filepath.Join(tmpDir, "recording.mp4")
+	initData := []byte{0x01, 0x02, 0x03}
+	au := [][]byte{{0x11, 0x22, 0x33}}
+
+	inst := Init(&Config{Logger: stdLogger{}})
+	inst.hub.SetInit(initData)
+
+	if err := inst.recorder.Start(recordPath, "instant", "pause"); err != nil {
+		t.Fatalf("start recorder: %v", err)
+	}
+	inst.recorder.SetInit(initData)
+
+	handler := &videoHandler{
+		hub:      inst.hub,
+		logger:   stdLogger{},
+		instance: inst,
+	}
+	handler.processAu(au, 0, true, true)
+
+	expectedFrag, err := BuildFragment(1, 0, 9000, true, AnnexbToAvcc(au))
+	if err != nil {
+		t.Fatalf("build expected fragment: %v", err)
+	}
+	expectedBytes := int64(len(initData) + len(expectedFrag))
+
+	if got := inst.recorder.Status().BytesWritten; got != expectedBytes {
+		t.Fatalf("unexpected bytes written: got %d want %d", got, expectedBytes)
+	}
+
+	info, err := os.Stat(recordPath)
+	if err != nil {
+		t.Fatalf("stat recording file: %v", err)
+	}
+	if info.Size() != expectedBytes {
+		t.Fatalf("unexpected recording file size: got %d want %d", info.Size(), expectedBytes)
+	}
+}
+
+func TestRecorderBlackOfflineSupportContract(t *testing.T) {
+	recorder := NewRecorder(stdLogger{})
+	recorder.SetSourceInfo("h264", 1280, 720, 30)
+
+	err := recorder.Start(filepath.Join(t.TempDir(), "black.mp4"), "instant", "black")
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "encoder") {
+			t.Fatalf("unexpected native black mode error: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("expected offlineMode=black to be unsupported without a native encoder backend")
 	}
 }

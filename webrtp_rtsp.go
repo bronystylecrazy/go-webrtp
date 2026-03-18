@@ -21,7 +21,14 @@ func (r *rtspConn) Close() {
 	}
 }
 
-func (r *Instance) connectRtsp(ctx context.Context) (*rtspConn, error) {
+func (r *Instance) connectRtsp(ctx context.Context) (sourceConn, error) {
+	if r.cfg.H264Profile == "baseline" {
+		ffmpegConn, err := r.connectRtspFFmpeg(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return ffmpegConn, nil
+	}
 	u, err := parseRtspUrl(r.cfg.Rtsp)
 	if err != nil {
 		return nil, err

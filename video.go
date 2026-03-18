@@ -24,7 +24,7 @@ type videoHandler struct {
 	mu       sync.Mutex
 }
 
-func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
+func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool, emit bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.hub.GetInit() == nil {
@@ -48,6 +48,10 @@ func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 
 	avcc := AnnexbToAvcc(au)
 	r.seqNr++
+	if !emit {
+		return
+	}
+
 	if recorder := r.instance.currentRecorder(); recorder != nil {
 		recorder.RecordSample(avcc, dur, isIDR)
 	}
@@ -61,6 +65,14 @@ func (r *videoHandler) processAu(au [][]byte, ts uint32, isIDR bool) {
 }
 
 func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []byte) {
+	r.processH264WithOptions(au, ts, spsBase, ppsBase, true)
+}
+
+func (r *videoHandler) processH264Warmup(au [][]byte, ts uint32, spsBase, ppsBase []byte) {
+	r.processH264WithOptions(au, ts, spsBase, ppsBase, false)
+}
+
+func (r *videoHandler) processH264WithOptions(au [][]byte, ts uint32, spsBase, ppsBase []byte, emit bool) {
 	isIDR := false
 	var inSPS, inPPS []byte
 	for _, nalu := range au {
@@ -112,11 +124,14 @@ func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []by
 		}
 
 		r.hub.SetInfo("H264", width, height, 0)
+		if recorder := r.instance.currentRecorder(); recorder != nil {
+			recorder.SetSourceInfo("h264", width, height, 0)
+		}
 		r.width = width
 		r.height = height
 		r.logger.Printf("H264 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
 	}
-	if isIDR && r.instance != nil && r.instance.keyframes != nil {
+	if emit && isIDR && r.instance != nil && r.instance.keyframes != nil {
 		exportAU := make([][]byte, 0, len(au)+2)
 		if len(r.h264SPS) > 0 {
 			exportAU = append(exportAU, append([]byte(nil), r.h264SPS...))
@@ -129,7 +144,7 @@ func (r *videoHandler) processH264(au [][]byte, ts uint32, spsBase, ppsBase []by
 		}
 		r.instance.keyframes.Enqueue("h264", r.width, r.height, exportAU, r.seqNr+1)
 	}
-	r.processAu(au, ts, isIDR)
+	r.processAu(au, ts, isIDR, emit)
 }
 
 func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, ppsBase []byte) {
@@ -194,6 +209,9 @@ func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, pps
 		}
 
 		r.hub.SetInfo("H265", width, height, 0)
+		if recorder := r.instance.currentRecorder(); recorder != nil {
+			recorder.SetSourceInfo("h265", width, height, 0)
+		}
 		r.width = width
 		r.height = height
 		r.logger.Printf("H265 init ready (%dx%d, %d bytes)", width, height, len(initSeg))
@@ -214,5 +232,5 @@ func (r *videoHandler) processH265(au [][]byte, ts uint32, vpsBase, spsBase, pps
 		}
 		r.instance.keyframes.Enqueue("h265", r.width, r.height, exportAU, r.seqNr+1)
 	}
-	r.processAu(au, ts, isIDR)
+	r.processAu(au, ts, isIDR, true)
 }

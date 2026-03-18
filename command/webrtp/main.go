@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,12 +21,12 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/connectedtechco/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp/streamcore"
 	"github.com/dustin/go-humanize"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/mattn/go-isatty"
-	"gopkg.in/yaml.v3"
 )
 
 //go:embed index.html
@@ -56,71 +55,12 @@ var CLI struct {
 	ListUsbDevices bool   `help:"List available USB video devices and exit" default:"false"`
 }
 
-type Config struct {
-	TelemetryServiceName *string     `yaml:"telemetryServiceName"`
-	TelemetryEndpoint    *string     `yaml:"telemetryEndpoint"`
-	Upstreams            []*Upstream `yaml:"upstreams"`
-}
-
-type Upstream struct {
-	Name              *string      `yaml:"name"`
-	SourceType        *string      `yaml:"sourceType"`
-	RtspUrl           string       `yaml:"rtspUrl"`
-	Device            string       `yaml:"device"`
-	Path              string       `yaml:"path"`
-	Codec             string       `yaml:"codec"`
-	Width             *int         `yaml:"width"`
-	Height            *int         `yaml:"height"`
-	FrameRate         *float64     `yaml:"frameRate"`
-	BitrateKbps       *int         `yaml:"bitrateKbps"`
-	ServeStream       *bool        `yaml:"serveStream,omitempty"`
-	CalibrationFrom   string       `yaml:"calibrationFrom,omitempty"`
-	KeyframeSink      string       `yaml:"keyframeSink"`
-	KeyframeOutput    string       `yaml:"keyframeOutput"`
-	KeyframeFormat    string       `yaml:"keyframeFormat"`
-	KeyframeMqttURL   string       `yaml:"keyframeMqttUrl,omitempty"`
-	KeyframeMqttTopic string       `yaml:"keyframeMqttTopic,omitempty"`
-	Enabled           *bool        `yaml:"enabled"`
-	OnDemand          bool         `yaml:"onDemand"`
-	Renditions        []*Rendition `yaml:"renditions"`
-}
-
-type Rendition struct {
-	Name        string   `yaml:"name" json:"name"`
-	Width       *int     `yaml:"width,omitempty" json:"width,omitempty"`
-	Height      *int     `yaml:"height,omitempty" json:"height,omitempty"`
-	FrameRate   *float64 `yaml:"frameRate,omitempty" json:"frameRate,omitempty"`
-	BitrateKbps *int     `yaml:"bitrateKbps,omitempty" json:"bitrateKbps,omitempty"`
-	OnDemand    *bool    `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
-}
-
-type Stream struct {
-	Name          string
-	GroupName     string
-	RenditionName string
-	Url           string
-	Inst          *webrtp.Instance
-	Hub           *webrtp.Hub
-	Handler       fiber.Handler
-	Stop          func() error
-	OnDemand      bool
-	startMu       sync.Mutex
-	started       atomic.Bool
-	stopTimerMu   sync.Mutex
-	stopTimer     *time.Timer
-}
-
 type tickMsg struct{ time.Time }
 
 type RecordRequest struct {
 	Path        string `json:"path"`
+	Mode        string `json:"mode"`
 	OfflineMode string `json:"offlineMode"`
-}
-
-type ModeRequest struct {
-	Width     int      `json:"width"`
-	Height    int      `json:"height"`
-	FrameRate *float64 `json:"frameRate"`
 }
 
 type RecordResponse struct {
@@ -153,10 +93,11 @@ type VersionResponse struct {
 }
 
 type Model struct {
-	manager      *StreamManager
+	manager      *streamcore.Manager
 	page         int
 	pageSize     int
 	stats        []webrtp.StreamStats
+	logMu        sync.Mutex
 	logs         []string
 	quitting     bool
 	windowWidth  int
@@ -269,17 +210,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.page--
 			}
 		case "right", "l":
-			if (m.page+1)*m.pageSize < len(m.manager.StreamListExpandedActive()) {
+			if (m.page+1)*m.pageSize < len(m.manager.ListExpandedActive()) {
 				m.page++
 			}
 		}
 	case tickMsg:
 		m.stats = nil
-		streams := m.manager.StreamListExpandedActive()
+		streams := m.manager.ListExpandedActive()
 		for _, s := range streams {
 			m.stats = append(m.stats, s.Hub.GetStats(tuiStreamDisplayName(s)))
 		}
-		MetricsUpdate(m.manager.StreamList())
+		MetricsUpdate(m.manager.List())
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return tickMsg{t}
 		})
@@ -293,14 +234,25 @@ var (
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
+const tuiLogLines = 10
+
 func (m *Model) View() string {
 	if m.quitting {
 		return "Goodbye!\n"
 	}
 
+	viewWidth := m.windowWidth
+	if viewWidth <= 0 {
+		viewWidth = 120
+	}
+	viewHeight := m.windowHeight
+	if viewHeight <= 0 {
+		viewHeight = 32
+	}
+
 	var rows []table.Row
 	m.stats = nil
-	streams := m.manager.StreamListExpandedActive()
+	streams := m.manager.ListExpandedActive()
 
 	start := m.page * m.pageSize
 	end := start + m.pageSize
@@ -337,11 +289,10 @@ func (m *Model) View() string {
 		})
 	}
 
-	// Calculate table height based on window size
-	// Layout: header(5) + logs(10) + nav(3) = ~18 fixed lines
-	tableHeight := 10 // default
-	if m.windowHeight > 18 {
-		tableHeight = m.windowHeight - 18
+	// Layout: title(4) + nav(1) + gap/header(2) + logs(10)
+	tableHeight := 10
+	if available := viewHeight - 17 - tuiLogLines; available > 5 {
+		tableHeight = available
 	}
 
 	t := table.New(
@@ -376,14 +327,21 @@ func (m *Model) View() string {
 	nav := dimStyle.Render(fmt.Sprintf("Page %d/%d (←/→ to navigate, q to quit)", m.page+1, totalPages))
 
 	// Build logs view (last 10 lines)
-	var logsView string
+	logWidth := max(20, viewWidth-2)
+	logLines := make([]string, 0, tuiLogLines)
+	m.logMu.Lock()
 	if len(m.logs) > 0 {
-		start := len(m.logs) - 10
+		start := len(m.logs) - tuiLogLines
 		if start < 0 {
 			start = 0
 		}
-		logsView = dimStyle.Render(strings.Join(m.logs[start:], "\n"))
+		logLines = append(logLines, formatLogLines(m.logs[start:], logWidth)...)
 	}
+	m.logMu.Unlock()
+	for len(logLines) < tuiLogLines {
+		logLines = append(logLines, "")
+	}
+	logsView := dimStyle.Width(logWidth).Height(tuiLogLines).Render(strings.Join(logLines[:tuiLogLines], "\n"))
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		whiteStyle.Render("┌────────────────────────────────────────┐"),
@@ -421,87 +379,44 @@ func truncateCell(s string, maxWidth int) string {
 	return strings.TrimRight(s[:maxWidth-2], " ") + "… "
 }
 
-func streamDisplayName(s *Stream) string {
+func streamDisplayName(s *streamcore.Stream) string {
 	if s.GroupName != "" {
 		return s.GroupName
 	}
 	return s.Name
 }
 
-func tuiStreamDisplayName(s *Stream) string {
+func tuiStreamDisplayName(s *streamcore.Stream) string {
 	if s.GroupName != "" && s.RenditionName != "" {
 		return fmt.Sprintf("%s/%s", s.GroupName, s.RenditionName)
 	}
 	return streamDisplayName(s)
 }
 
-func (s *Stream) EnsureStarted() {
-	if !s.OnDemand || s.started.Load() {
-		return
+func formatLogLines(lines []string, width int) []string {
+	if width < 8 {
+		width = 8
 	}
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	if s.started.Load() {
-		return
-	}
-	s.stopTimerMu.Lock()
-	if s.stopTimer != nil {
-		s.stopTimer.Stop()
-		s.stopTimer = nil
-	}
-	s.stopTimerMu.Unlock()
-	s.started.Store(true)
-	go func() {
-		if err := s.Inst.Connect(); err != nil {
-			log.Printf("stream %s: %v", s.Name, err)
+	formatted := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+		if line == "" {
+			continue
 		}
-		s.started.Store(false)
-	}()
+		formatted = append(formatted, clampLineWidth(line, width))
+	}
+	return formatted
 }
 
-func (s *Stream) HasActiveRecording() bool {
-	return s.Inst.RecordingStatus().Active
-}
-
-func (s *Stream) StopNow() error {
-	s.stopTimerMu.Lock()
-	if s.stopTimer != nil {
-		s.stopTimer.Stop()
-		s.stopTimer = nil
+func clampLineWidth(s string, width int) string {
+	if width < 4 || lipgloss.Width(s) <= width {
+		return s
 	}
-	s.stopTimerMu.Unlock()
-	s.started.Store(false)
-	return s.Stop()
-}
-
-func (s *Stream) MaybeScheduleStop(idle time.Duration) {
-	if !s.OnDemand {
-		return
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
 	}
-	if s.HasActiveRecording() {
-		return
-	}
-	if s.activeClientCount() > 0 {
-		return
-	}
-	s.stopTimerMu.Lock()
-	defer s.stopTimerMu.Unlock()
-	if s.stopTimer != nil {
-		s.stopTimer.Stop()
-	}
-	s.stopTimer = time.AfterFunc(idle, func() {
-		if s.activeClientCount() > 0 {
-			return
-		}
-		if s.HasActiveRecording() {
-			return
-		}
-		_ = s.StopNow()
-	})
-}
-
-func (s *Stream) activeClientCount() int32 {
-	return s.Hub.GetStats(s.Name).ClientCount
+	return string(runes[:max(0, width-2)]) + ".."
 }
 
 func sanitizeRecordingName(name string) string {
@@ -520,7 +435,7 @@ func sanitizeRecordingName(name string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-func defaultRecordingPath(stream *Stream) string {
+func defaultRecordingPath(stream *streamcore.Stream) string {
 	base := sanitizeRecordingName(stream.GroupName)
 	if base == "" {
 		base = sanitizeRecordingName(stream.Name)
@@ -532,7 +447,7 @@ func defaultRecordingPath(stream *Stream) string {
 	return filepath.Join("recordings", filename)
 }
 
-func recordingResponse(stream *Stream) *RecordResponse {
+func recordingResponse(stream *streamcore.Stream) *RecordResponse {
 	name := stream.GroupName
 	if name == "" {
 		name = stream.Name
@@ -542,26 +457,6 @@ func recordingResponse(stream *Stream) *RecordResponse {
 		Quality:   stream.RenditionName,
 		Recording: stream.Inst.RecordingStatus(),
 	}
-}
-
-func loadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse yaml: %w", err)
-	}
-
-	for _, u := range cfg.Upstreams {
-		if err := StreamValidateUpstream(u); err != nil {
-			return nil, err
-		}
-	}
-
-	return &cfg, nil
 }
 
 func hashDeviceID(raw string) string {
@@ -628,8 +523,8 @@ func apiDeviceCapabilities(deviceID string) (*DeviceCapabilitiesResponse, error)
 	return resp, nil
 }
 
-func apiHealth(manager *StreamManager) *HealthResponse {
-	streams := manager.StreamStatusList()
+func apiHealth(manager *streamcore.Manager) *HealthResponse {
+	streams := manager.ListResponses()
 	resp := &HealthResponse{
 		Status:    "ok",
 		StartedAt: serverStarted,
@@ -673,9 +568,25 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	manager, err := StreamManagerNew(CLI.Config, cfg)
+	var tuiModel *Model
+	if CLI.Interface && isatty.IsTerminal(os.Stdout.Fd()) {
+		tuiModel = &Model{
+			pageSize: 10,
+			logs:     []string{},
+		}
+		log.SetOutput(&logWriter{model: tuiModel})
+		log.SetFlags(0)
+	}
+
+	manager, err := streamcore.NewManager(
+		streamcore.WithConfigFile(CLI.Config),
+		streamcore.WithConfig(cfg),
+	)
 	if err != nil {
 		log.Fatalf("stream manager: %v", err)
+	}
+	if tuiModel != nil {
+		tuiModel.manager = manager
 	}
 
 	// Create single fiber instance
@@ -694,7 +605,7 @@ func main() {
 			return fiber.ErrNotFound
 		}
 		stream.EnsureStarted()
-		return stream.Handler(c)
+		return stream.FiberHandler()(c)
 	})
 	app.All("/stream/:name", func(c fiber.Ctx) error {
 		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
@@ -702,11 +613,11 @@ func main() {
 			return fiber.ErrNotFound
 		}
 		stream.EnsureStarted()
-		return stream.Handler(c)
+		return stream.FiberHandler()(c)
 	})
 
 	app.Get("/info", func(c fiber.Ctx) error {
-		streams := manager.StreamList()
+		streams := manager.List()
 		stats := make([]*webrtp.StreamStats, len(streams))
 		for i, s := range streams {
 			streamStats := s.Hub.GetStats(streamDisplayName(s))
@@ -717,8 +628,8 @@ func main() {
 		return c.JSON(webrtp.Status{Streams: stats})
 	})
 	app.Get("/api/streams", func(c fiber.Ctx) error {
-		items := manager.StreamStatusList()
-		StreamResponsesSort(items)
+		items := manager.ListResponses()
+		streamcore.SortResponses(items)
 		return c.JSON(items)
 	})
 	app.Get("/api/devices", func(c fiber.Ctx) error {
@@ -762,25 +673,25 @@ func main() {
 	app.All("/ws/devices", DeviceSocketHandler())
 	app.All("/ws/deskview", DeskViewSocketHandler(deskViewBroker))
 	app.Post("/api/streams", func(c fiber.Ctx) error {
-		req := &StreamApiRequest{}
+		req := &streamcore.StreamRequest{}
 		if err := c.Bind().Body(req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		item, err := manager.StreamCreate(req)
+		item, err := manager.Create(req)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		return c.Status(fiber.StatusCreated).JSON(item)
 	})
 	app.Get("/api/streams/:name", func(c fiber.Ctx) error {
-		item, ok := manager.StreamStatus(c.Params("name"))
+		item, ok := manager.Get(c.Params("name"))
 		if !ok {
 			return fiber.ErrNotFound
 		}
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/enable", func(c fiber.Ctx) error {
-		item, err := manager.StreamSetEnabled(c.Params("name"), true)
+		item, err := manager.SetEnabled(c.Params("name"), true)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -790,7 +701,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/disable", func(c fiber.Ctx) error {
-		item, err := manager.StreamSetEnabled(c.Params("name"), false)
+		item, err := manager.SetEnabled(c.Params("name"), false)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -800,7 +711,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/start", func(c fiber.Ctx) error {
-		item, err := manager.StreamStart(c.Params("name"), c.Query("quality"))
+		item, err := manager.Start(c.Params("name"), c.Query("quality"))
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -810,7 +721,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/stop", func(c fiber.Ctx) error {
-		item, err := manager.StreamStop(c.Params("name"), c.Query("quality"))
+		item, err := manager.Stop(c.Params("name"), c.Query("quality"))
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -820,11 +731,11 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/mode", func(c fiber.Ctx) error {
-		req := &ModeRequest{}
+		req := &streamcore.ModeRequest{}
 		if err := c.Bind().Body(req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		item, err := manager.StreamModeUpdate(c.Params("name"), req)
+		item, err := manager.UpdateMode(c.Params("name"), req)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -834,7 +745,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Get("/api/streams/:name/capabilities", func(c fiber.Ctx) error {
-		item, ok, err := manager.StreamCapabilities(c.Params("name"))
+		item, ok, err := manager.Capabilities(c.Params("name"))
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
@@ -869,11 +780,11 @@ func main() {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 	app.Put("/api/streams/:name", func(c fiber.Ctx) error {
-		req := &StreamApiRequest{}
+		req := &streamcore.StreamRequest{}
 		if err := c.Bind().Body(req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		item, err := manager.StreamUpdate(c.Params("name"), req)
+		item, err := manager.Update(c.Params("name"), req)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -883,7 +794,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Delete("/api/streams/:name", func(c fiber.Ctx) error {
-		if err := manager.StreamDelete(c.Params("name")); err != nil {
+		if err := manager.Delete(c.Params("name")); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
 			}
@@ -907,7 +818,7 @@ func main() {
 		if path == "" {
 			path = defaultRecordingPath(stream)
 		}
-		if err := stream.Inst.StartRecording(path, "", req.OfflineMode); err != nil {
+		if err := stream.Inst.StartRecording(path, req.Mode, req.OfflineMode); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		return c.Status(fiber.StatusCreated).JSON(recordingResponse(stream))
@@ -975,8 +886,8 @@ func main() {
 		addr := fmt.Sprintf(":%d", CLI.Port)
 		log.Printf("HTTP server listening on http://localhost%s", addr)
 		log.Printf("Streams available:")
-		for i, s := range manager.StreamList() {
-			log.Printf("  - /stream/no/%d (%s) -> %s", i, streamDisplayName(s), s.Url)
+		for i, s := range manager.List() {
+			log.Printf("  - /stream/no/%d (%s) -> %s", i, streamDisplayName(s), s.URL)
 		}
 		if err := app.Listen(addr); err != nil {
 			log.Printf("HTTP: %v", err)
@@ -986,36 +897,25 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if CLI.Interface && isatty.IsTerminal(os.Stdout.Fd()) {
-		runTUI(ctx, manager)
+	if tuiModel != nil {
+		runTUI(ctx, tuiModel)
 	} else {
 		runServer(ctx, manager)
 	}
 }
 
-func runServer(ctx context.Context, manager *StreamManager) {
+func runServer(ctx context.Context, manager *streamcore.Manager) {
 	_ = ctx
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 	log.Println("shutting down")
-	manager.StreamStopAll()
+	manager.Close()
 }
 
-func runTUI(ctx context.Context, manager *StreamManager) {
+func runTUI(ctx context.Context, model *Model) {
 	_ = ctx
-	m := &Model{
-		manager:  manager,
-		pageSize: 10,
-		logs:     []string{},
-	}
-
-	p := tea.NewProgram(m, tea.WithAltScreen())
-
-	// Create a log writer that sends to Model
-	logWriter := &logWriter{logs: &m.logs}
-	log.SetOutput(logWriter)
-	log.SetFlags(0)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("Model: %v", err)
@@ -1023,41 +923,22 @@ func runTUI(ctx context.Context, manager *StreamManager) {
 }
 
 type logWriter struct {
-	logs *[]string
+	model *Model
 }
 
 func (w *logWriter) Write(p []byte) (n int, err error) {
-	msg := strings.TrimSpace(string(p))
-	if msg != "" {
-		*w.logs = append(*w.logs, msg)
-		// Keep only last 100 logs
-		if len(*w.logs) > 100 {
-			*w.logs = (*w.logs)[len(*w.logs)-100:]
+	lines := strings.Split(string(p), "\n")
+	w.model.logMu.Lock()
+	defer w.model.logMu.Unlock()
+	for _, line := range lines {
+		msg := strings.TrimSpace(line)
+		if msg == "" {
+			continue
 		}
-		if shouldMirrorLogLine(msg) {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
+		w.model.logs = append(w.model.logs, msg)
+		if len(w.model.logs) > 100 {
+			w.model.logs = w.model.logs[len(w.model.logs)-100:]
 		}
 	}
 	return len(p), nil
-}
-
-func shouldMirrorLogLine(msg string) bool {
-	msg = strings.ToLower(strings.TrimSpace(msg))
-	if msg == "" {
-		return false
-	}
-	for _, needle := range []string{
-		" error",
-		"error:",
-		"failed",
-		"fatal",
-		"panic",
-		"unavailable",
-		"timed out",
-	} {
-		if strings.Contains(msg, needle) {
-			return true
-		}
-	}
-	return false
 }

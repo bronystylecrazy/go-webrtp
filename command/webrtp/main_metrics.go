@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bronystylecrazy/go-webrtp/streamcore"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
 	"github.com/prometheus/client_golang/prometheus"
@@ -99,7 +100,7 @@ func MetricsRoute(app *fiber.App) {
 	app.Get("/metrics", adaptor.HTTPHandler(handler))
 }
 
-func MetricsUpdate(streams []*Stream) {
+func MetricsUpdate(streams []*streamcore.Stream) {
 	if streamClientsGauge == nil {
 		return
 	}

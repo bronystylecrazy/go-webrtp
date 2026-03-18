@@ -1,21 +1,23 @@
-//go:build windows
+//go:build darwin
 
 package webrtp
 
 /*
-#cgo LDFLAGS: -lole32 -lmfplat -lmf -lmfuuid -lmfreadwrite -lpropsys
+#cgo CFLAGS: -x objective-c -fobjc-arc
+#cgo LDFLAGS: -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework Foundation -framework VideoToolbox
 #include <stdint.h>
 #include <stdlib.h>
 
-typedef void *WebrtpUsbWinCaptureRef;
+typedef void *WebrtpUsbMacCaptureRef;
 
-extern void WebrtpUsbWinPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
-extern void WebrtpUsbWinError(uintptr_t handle, char *msg);
+extern void WebrtpUsbMacPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
+extern void WebrtpUsbMacError(uintptr_t handle, char *msg);
 
-WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
-void WebrtpUsbWinCaptureStop(WebrtpUsbWinCaptureRef ref);
-char *WebrtpUsbWinDeviceList(char **errOut);
-char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOut);
+WebrtpUsbMacCaptureRef WebrtpUsbMacCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
+void WebrtpUsbMacCaptureStop(WebrtpUsbMacCaptureRef ref);
+void WebrtpUsbMacCaptureForceKeyFrame(WebrtpUsbMacCaptureRef ref);
+char *WebrtpUsbMacDeviceList(char **errOut);
+char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut);
 */
 import "C"
 
@@ -31,7 +33,7 @@ import (
 )
 
 type usbConn struct {
-	ref    C.WebrtpUsbWinCaptureRef
+	ref    C.WebrtpUsbMacCaptureRef
 	cancel context.CancelFunc
 	once   sync.Once
 }
@@ -52,10 +54,18 @@ func (r *usbConn) Close() {
 			r.cancel()
 		}
 		if r.ref != nil {
-			C.WebrtpUsbWinCaptureStop(r.ref)
+			C.WebrtpUsbMacCaptureStop(r.ref)
 			r.ref = nil
 		}
 	})
+}
+
+func (r *usbConn) ForceNextKeyFrame() error {
+	if r.ref == nil {
+		return fmt.Errorf("usb capture is not active")
+	}
+	C.WebrtpUsbMacCaptureForceKeyFrame(r.ref)
+	return nil
 }
 
 func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
@@ -67,6 +77,8 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	if codec != "h264" && codec != "h265" {
 		return nil, fmt.Errorf("usb source requires codec to be h264 or h265")
 	}
+
+	fps := r.cfg.FrameRate
 
 	usbCtx, cancel := context.WithCancel(ctx)
 	conn := &usbConn{cancel: cancel}
@@ -81,11 +93,13 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 
 	cDevice := C.CString(device)
 	cCodec := C.CString(codec)
+	cH264Profile := C.CString(r.cfg.H264Profile)
 	defer C.free(unsafe.Pointer(cDevice))
 	defer C.free(unsafe.Pointer(cCodec))
+	defer C.free(unsafe.Pointer(cH264Profile))
 
 	var cErr *C.char
-	ref := C.WebrtpUsbWinCaptureStart(cDevice, cCodec, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(r.cfg.FrameRate), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
+	ref := C.WebrtpUsbMacCaptureStart(cDevice, cCodec, cH264Profile, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(fps), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
 	if ref == nil {
 		usbRegistry.Delete(handle)
 		cancel()
@@ -108,8 +122,8 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	return conn, nil
 }
 
-//export WebrtpUsbWinPacket
-func WebrtpUsbWinPacket(handle C.uintptr_t, data unsafe.Pointer, length C.int, pts90k C.uint32_t) {
+//export WebrtpUsbMacPacket
+func WebrtpUsbMacPacket(handle C.uintptr_t, data unsafe.Pointer, length C.int, pts90k C.uint32_t) {
 	entryValue, ok := usbRegistry.Load(uintptr(handle))
 	if !ok {
 		return
@@ -127,8 +141,8 @@ func WebrtpUsbWinPacket(handle C.uintptr_t, data unsafe.Pointer, length C.int, p
 	}
 }
 
-//export WebrtpUsbWinError
-func WebrtpUsbWinError(handle C.uintptr_t, msg *C.char) {
+//export WebrtpUsbMacError
+func WebrtpUsbMacError(handle C.uintptr_t, msg *C.char) {
 	entryValue, ok := usbRegistry.Load(uintptr(handle))
 	if !ok {
 		return
@@ -144,7 +158,7 @@ func WebrtpUsbWinError(handle C.uintptr_t, msg *C.char) {
 
 func UsbDeviceList() ([]*UsbDevice, error) {
 	var cErr *C.char
-	result := C.WebrtpUsbWinDeviceList(&cErr)
+	result := C.WebrtpUsbMacDeviceList(&cErr)
 	if result == nil {
 		if cErr != nil {
 			defer C.free(unsafe.Pointer(cErr))
@@ -162,7 +176,8 @@ func UsbDeviceList() ([]*UsbDevice, error) {
 			continue
 		}
 		parts := strings.SplitN(line, "\t", 2)
-		device := &UsbDevice{Id: parts[0]}
+		device := &UsbDevice{}
+		device.Id = parts[0]
 		if len(parts) > 1 && parts[1] != "" {
 			device.Name = parts[1]
 		} else {
@@ -193,7 +208,7 @@ func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	defer C.free(unsafe.Pointer(cDevice))
 
 	var cErr *C.char
-	result := C.WebrtpUsbWinDeviceCapabilities(cDevice, &cErr)
+	result := C.WebrtpUsbMacDeviceCapabilities(cDevice, &cErr)
 	if result == nil {
 		if cErr != nil {
 			defer C.free(unsafe.Pointer(cErr))

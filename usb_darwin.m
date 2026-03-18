@@ -29,8 +29,10 @@ static uint32_t WebrtpUsbPts90k(CMTime pts) {
 @property(nonatomic, assign) int targetHeight;
 @property(nonatomic, assign) Float64 fps;
 @property(nonatomic, assign) int bitrateKbps;
+@property(nonatomic, copy) NSString *h264Profile;
 @property(nonatomic, assign) BOOL includeParameterSets;
 @property(nonatomic, assign) BOOL forceNextKeyFrame;
+@property(nonatomic, assign) BOOL loggedFirstFrameSize;
 @end
 
 static NSString *WebrtpUsbMacSessionPresetForSize(int width, int height) {
@@ -44,6 +46,85 @@ static NSString *WebrtpUsbMacSessionPresetForSize(int width, int height) {
         return AVCaptureSessionPreset1920x1080;
     }
     return nil;
+}
+
+static NSArray<NSDictionary *> *WebrtpUsbMacVideoPresetModes(void) {
+    return @[
+        @{@"preset": AVCaptureSessionPreset3840x2160, @"width": @3840, @"height": @2160},
+        @{@"preset": AVCaptureSessionPreset1920x1080, @"width": @1920, @"height": @1080},
+        @{@"preset": AVCaptureSessionPreset1280x720, @"width": @1280, @"height": @720},
+        @{@"preset": AVCaptureSessionPreset640x480, @"width": @640, @"height": @480},
+    ];
+}
+
+static AVCaptureDeviceFormat *WebrtpUsbMacFindFormatForSize(AVCaptureDevice *device, int width, int height, double fps) {
+    AVCaptureDeviceFormat *bestFormat = nil;
+    double bestScore = DBL_MAX;
+    for (AVCaptureDeviceFormat *format in device.formats) {
+        CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+        if (dims.width != width || dims.height != height) {
+            continue;
+        }
+        double fpsScore = 0;
+        if (fps > 0) {
+            double candidate = 0;
+            for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
+                if (range.maxFrameRate >= fps) {
+                    candidate = fps;
+                    break;
+                }
+                candidate = MAX(candidate, range.maxFrameRate);
+            }
+            fpsScore = candidate > 0 ? fabs(candidate - fps) * 10.0 : 1000000.0;
+        }
+        if (fpsScore < bestScore) {
+            bestScore = fpsScore;
+            bestFormat = format;
+        }
+    }
+    return bestFormat;
+}
+
+static NSDictionary *WebrtpUsbMacBestAutoVideoMode(AVCaptureDevice *device, AVCaptureSession *session, double fps) {
+    for (NSDictionary *mode in WebrtpUsbMacVideoPresetModes()) {
+        NSString *preset = mode[@"preset"];
+        if (![session canSetSessionPreset:preset]) {
+            continue;
+        }
+        int width = [mode[@"width"] intValue];
+        int height = [mode[@"height"] intValue];
+        AVCaptureDeviceFormat *format = WebrtpUsbMacFindFormatForSize(device, width, height, fps);
+        if (format != nil) {
+            return @{@"preset": preset, @"width": @(width), @"height": @(height), @"format": format};
+        }
+    }
+    return nil;
+}
+
+static OSType WebrtpUsbMacCapturePixelFormat(int width, int height) {
+    if (width > 1920 || height > 1080) {
+        return kCVPixelFormatType_422YpCbCr8;
+    }
+    return kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+}
+
+static NSString *WebrtpUsbMacPixelFormatName(OSType pixelFormat) {
+    switch (pixelFormat) {
+        case kCVPixelFormatType_422YpCbCr8:
+            return @"uyvy422";
+        case kCVPixelFormatType_422YpCbCr8_yuvs:
+            return @"yuyv422";
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+            return @"nv12-full";
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+            return @"nv12-video";
+        case kCVPixelFormatType_32ARGB:
+            return @"0rgb";
+        case kCVPixelFormatType_32BGRA:
+            return @"bgr0";
+        default:
+            return [NSString stringWithFormat:@"0x%08x", (unsigned int) pixelFormat];
+    }
 }
 
 static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sourceFrameRefCon, OSStatus status, VTEncodeInfoFlags infoFlags, CMSampleBufferRef sampleBuffer) {
@@ -135,7 +216,7 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
 
 @implementation WebrtpUsbMacCapture
 
-- (instancetype)initWithHandle:(uintptr_t)handle codec:(NSString *)codec width:(int)width height:(int)height fps:(double)fps bitrateKbps:(int)bitrateKbps {
+- (instancetype)initWithHandle:(uintptr_t)handle codec:(NSString *)codec h264Profile:(NSString *)h264Profile width:(int)width height:(int)height fps:(double)fps bitrateKbps:(int)bitrateKbps {
     self = [super init];
     if (self == nil) {
         return nil;
@@ -145,8 +226,10 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
     _targetHeight = height;
     _fps = fps;
     _bitrateKbps = bitrateKbps;
+    _h264Profile = [h264Profile copy];
     _queue = dispatch_queue_create("go.webrtp.usb.capture", DISPATCH_QUEUE_SERIAL);
     _includeParameterSets = YES;
+    _loggedFirstFrameSize = NO;
     if ([[codec lowercaseString] isEqualToString:@"h265"]) {
         _codecType = kCMVideoCodecType_HEVC;
     } else {
@@ -189,52 +272,8 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
         return NO;
     }
 
-    AVCaptureDeviceFormat *bestFormat = nil;
-    if ((self.targetWidth > 0 && self.targetHeight > 0) || self.fps > 0) {
-        double bestScore = DBL_MAX;
-        for (AVCaptureDeviceFormat *format in device.formats) {
-            CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
-            if (dims.width <= 0 || dims.height <= 0) {
-                continue;
-            }
-            if (self.targetWidth > 0 && self.targetHeight > 0 &&
-                (dims.width != self.targetWidth || dims.height != self.targetHeight)) {
-                continue;
-            }
-            double sizeScore = 0;
-            if (self.targetWidth > 0 && self.targetHeight > 0) {
-                sizeScore = fabs((double)dims.width - self.targetWidth) + fabs((double)dims.height - self.targetHeight);
-            }
-            double fpsScore = 0;
-            if (self.fps > 0) {
-                double candidate = 0;
-                for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
-                    if (range.maxFrameRate >= self.fps) {
-                        candidate = self.fps;
-                        break;
-                    }
-                    candidate = MAX(candidate, range.maxFrameRate);
-                }
-                fpsScore = candidate > 0 ? fabs(candidate - self.fps) * 10.0 : 1000000.0;
-            }
-            double score = sizeScore + fpsScore;
-            if (score < bestScore) {
-                bestScore = score;
-                bestFormat = format;
-            }
-        }
-        if (bestFormat == nil && self.targetWidth > 0 && self.targetHeight > 0) {
-            if (error != NULL) {
-                NSString *msg = [NSString stringWithFormat:@"requested mode %dx%d is not supported by device", self.targetWidth, self.targetHeight];
-                *error = [NSError errorWithDomain:@"go-webrtp" code:8 userInfo:@{NSLocalizedDescriptionKey: msg}];
-            }
-            return NO;
-        }
-    }
-
     AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
     output.alwaysDiscardsLateVideoFrames = YES;
-    output.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
     [output setSampleBufferDelegate:self queue:self.queue];
 
     AVCaptureSession *session = [[AVCaptureSession alloc] init];
@@ -251,19 +290,48 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
         return NO;
     }
 
+    AVCaptureDeviceFormat *bestFormat = nil;
+    NSString *requestedPreset = nil;
+    int selectedWidth = self.targetWidth;
+    int selectedHeight = self.targetHeight;
+    if (self.targetWidth > 0 && self.targetHeight > 0) {
+        requestedPreset = WebrtpUsbMacSessionPresetForSize(self.targetWidth, self.targetHeight);
+        if (requestedPreset == nil) {
+            if (error != NULL) {
+                NSString *msg = [NSString stringWithFormat:@"requested mode %dx%d is not a supported live video mode on macOS", self.targetWidth, self.targetHeight];
+                *error = [NSError errorWithDomain:@"go-webrtp" code:8 userInfo:@{NSLocalizedDescriptionKey: msg}];
+            }
+            return NO;
+        }
+        bestFormat = WebrtpUsbMacFindFormatForSize(device, self.targetWidth, self.targetHeight, self.fps);
+        if (bestFormat == nil) {
+            if (error != NULL) {
+                NSString *msg = [NSString stringWithFormat:@"requested mode %dx%d is not supported by device", self.targetWidth, self.targetHeight];
+                *error = [NSError errorWithDomain:@"go-webrtp" code:8 userInfo:@{NSLocalizedDescriptionKey: msg}];
+            }
+            return NO;
+        }
+    } else if (self.fps > 0) {
+        NSDictionary *autoMode = WebrtpUsbMacBestAutoVideoMode(device, session, self.fps);
+        if (autoMode != nil) {
+            requestedPreset = autoMode[@"preset"];
+            selectedWidth = [autoMode[@"width"] intValue];
+            selectedHeight = [autoMode[@"height"] intValue];
+            bestFormat = autoMode[@"format"];
+        }
+    }
+
     [session beginConfiguration];
     [session addInput:input];
     [session addOutput:output];
-    NSString *requestedPreset = nil;
-    if (self.targetWidth > 0 && self.targetHeight > 0) {
-        requestedPreset = WebrtpUsbMacSessionPresetForSize(self.targetWidth, self.targetHeight);
-    }
     if (requestedPreset != nil && [session canSetSessionPreset:requestedPreset]) {
         session.sessionPreset = requestedPreset;
     } else if (!((self.targetWidth > 0 && self.targetHeight > 0) || self.fps > 0) &&
                [session canSetSessionPreset:AVCaptureSessionPresetHigh]) {
         session.sessionPreset = AVCaptureSessionPresetHigh;
     }
+    OSType pixelFormat = WebrtpUsbMacCapturePixelFormat(selectedWidth, selectedHeight);
+    output.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(pixelFormat)};
     if (bestFormat != nil) {
         if ([device lockForConfiguration:error]) {
             device.activeFormat = bestFormat;
@@ -273,7 +341,11 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
                 device.activeVideoMaxFrameDuration = frameDuration;
             }
             CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription);
-            NSLog(@"go-webrtp usb capture selected activeFormat %dx%d @ %.2f fps", dims.width, dims.height, self.fps);
+            if (selectedWidth > 0 && selectedHeight > 0 && (dims.width != selectedWidth || dims.height != selectedHeight)) {
+                NSLog(@"go-webrtp usb capture selected activeFormat %dx%d @ %.2f fps (requested video mode %dx%d, pixel format %@)", dims.width, dims.height, self.fps, selectedWidth, selectedHeight, WebrtpUsbMacPixelFormatName(pixelFormat));
+            } else {
+                NSLog(@"go-webrtp usb capture selected activeFormat %dx%d @ %.2f fps (pixel format %@)", dims.width, dims.height, self.fps, WebrtpUsbMacPixelFormatName(pixelFormat));
+            }
             [device unlockForConfiguration];
         } else {
             [session commitConfiguration];
@@ -306,6 +378,11 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
 
     size_t width = CVPixelBufferGetWidth(imageBuffer);
     size_t height = CVPixelBufferGetHeight(imageBuffer);
+    if (!self.loggedFirstFrameSize) {
+        self.loggedFirstFrameSize = YES;
+        OSType pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer);
+        NSLog(@"go-webrtp usb capture first frame %zux%zu (%@)", width, height, WebrtpUsbMacPixelFormatName(pixelFormat));
+    }
     OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault, (int32_t) width, (int32_t) height, self.codecType, NULL, NULL, NULL, WebrtpUsbMacCompressionOutput, (__bridge void *) self, &_compression);
     if (status != noErr || self.compression == NULL) {
         if (error != NULL) {
@@ -325,7 +402,21 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
         VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_DataRateLimits, (__bridge CFArrayRef) @[@(bitrate * 2 / 8), @1]);
     }
     VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, (__bridge CFTypeRef) @(2.0));
-    VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_ProfileLevel, self.codecType == kCMVideoCodecType_HEVC ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
+    CFStringRef profileLevel = kVTProfileLevel_HEVC_Main_AutoLevel;
+    if (self.codecType == kCMVideoCodecType_H264) {
+        NSString *profile = [self.h264Profile lowercaseString];
+        if ([profile isEqualToString:@"baseline"]) {
+            profileLevel = kVTProfileLevel_H264_Baseline_AutoLevel;
+        } else if ([profile isEqualToString:@"high"]) {
+            profileLevel = kVTProfileLevel_H264_High_AutoLevel;
+        } else {
+            profileLevel = kVTProfileLevel_H264_Main_AutoLevel;
+        }
+    }
+    VTSessionSetProperty(self.compression, kVTCompressionPropertyKey_ProfileLevel, profileLevel);
+    if (self.codecType == kCMVideoCodecType_H264) {
+        NSLog(@"go-webrtp usb capture using H264 profile %@", self.h264Profile.length > 0 ? self.h264Profile : @"main");
+    }
 
     status = VTCompressionSessionPrepareToEncodeFrames(self.compression);
     if (status != noErr) {
@@ -374,11 +465,12 @@ static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sour
 
 @end
 
-void *WebrtpUsbMacCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
+void *WebrtpUsbMacCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
     @autoreleasepool {
         NSString *deviceName = device != NULL ? [NSString stringWithUTF8String:device] : @"default";
         NSString *codecName = codec != NULL ? [NSString stringWithUTF8String:codec] : @"h264";
-        WebrtpUsbMacCapture *capture = [[WebrtpUsbMacCapture alloc] initWithHandle:handle codec:codecName width:width height:height fps:fps bitrateKbps:bitrateKbps];
+        NSString *profileName = h264Profile != NULL ? [NSString stringWithUTF8String:h264Profile] : @"";
+        WebrtpUsbMacCapture *capture = [[WebrtpUsbMacCapture alloc] initWithHandle:handle codec:codecName h264Profile:profileName width:width height:height fps:fps bitrateKbps:bitrateKbps];
         NSError *error = nil;
         if (![capture startWithDevice:deviceName error:&error]) {
             if (errOut != NULL) {
@@ -464,46 +556,50 @@ char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut) {
         result[@"codecs"] = @[@"h264", @"h265"];
         result[@"bitrateControl"] = @"target";
 
-        NSMutableDictionary<NSString *, NSMutableOrderedSet<NSNumber *> *> *modeMap = [NSMutableDictionary dictionary];
-        for (AVCaptureDeviceFormat *format in selected.formats) {
-            CMFormatDescriptionRef desc = format.formatDescription;
-            CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
-            if (dims.width <= 0 || dims.height <= 0) {
-                continue;
-            }
-            NSString *key = [NSString stringWithFormat:@"%d x %d", dims.width, dims.height];
-            NSMutableOrderedSet<NSNumber *> *fpsSet = modeMap[key];
-            if (fpsSet == nil) {
-                fpsSet = [NSMutableOrderedSet orderedSet];
-                modeMap[key] = fpsSet;
-            }
-            for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
-                double maxFps = range.maxFrameRate;
-                if (isfinite(maxFps) && maxFps > 0) {
-                    [fpsSet addObject:@(maxFps)];
+        AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:selected error:nil];
+        AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
+        AVCaptureSession *session = [[AVCaptureSession alloc] init];
+        NSMutableArray *modes = [NSMutableArray array];
+        if (input != nil && [session canAddInput:input] && [session canAddOutput:output]) {
+            [session addInput:input];
+            [session addOutput:output];
+            for (NSDictionary *mode in WebrtpUsbMacVideoPresetModes()) {
+                NSString *preset = mode[@"preset"];
+                if (![session canSetSessionPreset:preset]) {
+                    continue;
                 }
+                int width = [mode[@"width"] intValue];
+                int height = [mode[@"height"] intValue];
+                NSMutableOrderedSet<NSNumber *> *fpsSet = [NSMutableOrderedSet orderedSet];
+                for (AVCaptureDeviceFormat *format in selected.formats) {
+                    CMFormatDescriptionRef desc = format.formatDescription;
+                    CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
+                    if (dims.width != width || dims.height != height) {
+                        continue;
+                    }
+                    for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
+                        double maxFps = range.maxFrameRate;
+                        if (isfinite(maxFps) && maxFps > 0) {
+                            [fpsSet addObject:@(maxFps)];
+                        }
+                    }
+                }
+                if (fpsSet.count == 0) {
+                    continue;
+                }
+                NSMutableArray *fps = [NSMutableArray array];
+                for (NSNumber *value in fpsSet) {
+                    [fps addObject:value];
+                }
+                [fps sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+                    return [a compare:b];
+                }];
+                [modes addObject:@{
+                    @"width": @(width),
+                    @"height": @(height),
+                    @"fps": fps
+                }];
             }
-        }
-
-        NSArray<NSString *> *sortedKeys = [[modeMap allKeys] sortedArrayUsingSelector:@selector(compare:)];
-        NSMutableArray *modes = [NSMutableArray arrayWithCapacity:sortedKeys.count];
-        for (NSString *key in sortedKeys) {
-            NSArray<NSString *> *parts = [key componentsSeparatedByString:@" x "];
-            if (parts.count != 2) {
-                continue;
-            }
-            NSMutableArray *fps = [NSMutableArray array];
-            for (NSNumber *value in modeMap[key]) {
-                [fps addObject:value];
-            }
-            [fps sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
-                return [a compare:b];
-            }];
-            [modes addObject:@{
-                @"width": @([parts[0] intValue]),
-                @"height": @([parts[1] intValue]),
-                @"fps": fps
-            }];
         }
         result[@"modes"] = modes;
 

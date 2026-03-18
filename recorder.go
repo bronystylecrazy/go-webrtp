@@ -30,22 +30,32 @@ type RecordingStatus struct {
 }
 
 type Recorder struct {
-	mu          sync.Mutex
-	logger      Logger
-	file        *os.File
-	path        string
-	mode        string
-	offlineMode string
-	startedAt   time.Time
+	mu           sync.Mutex
+	logger       Logger
+	file         *os.File
+	path         string
+	mode         string
+	offlineMode  string
+	startedAt    time.Time
 	bytesWritten atomic.Int64
-	initData    []byte
-	initWritten bool
-	seqNr       uint32
-	dts         uint64
-	active      bool
-	bufferDur   uint64
-	prebuffer   []recordingSample
-	waitForIDR  bool
+	initData     []byte
+	initWritten  bool
+	seqNr        uint32
+	dts          uint64
+	active       bool
+	bufferDur    uint64
+	prebuffer    []recordingSample
+	waitForIDR   bool
+
+	codec      string
+	width      int
+	height     int
+	frameRate  float64
+	lastDur    uint32
+	offlineGen offlineFrameGenerator
+	offlineRun bool
+	offlineGap bool
+
 	requestedStartAt time.Time
 	actualStartAt    time.Time
 	requestedStopAt  time.Time
@@ -56,6 +66,11 @@ type recordingSample struct {
 	avcc  []byte
 	dur   uint32
 	isIDR bool
+}
+
+type offlineFrameGenerator interface {
+	NextFrame() ([]byte, bool, error)
+	Close() error
 }
 
 func NewRecorder(logger Logger) *Recorder {
@@ -91,7 +106,9 @@ func (r *Recorder) Start(path, mode, offlineMode string) error {
 	switch offlineMode {
 	case "pause", "stop":
 	case "black":
-		return fmt.Errorf("offlineMode=black is not supported yet for server-side recording")
+		if err := validateOfflineBlackSupport(r.codec, r.width, r.height); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported offline mode: %s", offlineMode)
 	}
@@ -125,6 +142,8 @@ func (r *Recorder) Start(path, mode, offlineMode string) error {
 	r.dts = 0
 	r.active = true
 	r.waitForIDR = mode == "exact"
+	r.offlineGap = false
+	r.stopOfflineGeneratorLocked()
 
 	if len(r.initData) > 0 {
 		if _, err := r.file.Write(r.initData); err != nil {
@@ -167,41 +186,21 @@ func (r *Recorder) RecordSample(avcc []byte, dur uint32, isIDR bool) {
 
 	r.cacheSampleLocked(avcc, dur, isIDR)
 
-	if !r.active || r.file == nil || len(r.initData) == 0 {
+	if !r.canRecordLiveLocked() {
 		return
 	}
-	if !r.initWritten {
-		if _, err := r.file.Write(r.initData); err != nil {
-			r.logger.Printf("recording init write failed: %v", err)
-			return
-		}
-		r.bytesWritten.Add(int64(len(r.initData)))
-		r.initWritten = true
+	if !r.transitionToLiveLocked(isIDR) {
+		return
 	}
-	if r.waitForIDR {
-		if !isIDR {
-			return
-		}
-		r.waitForIDR = false
+	if !r.ensureInitWrittenLocked() {
+		return
+	}
+	if !r.acceptLiveSampleLocked(isIDR) {
+		return
 	}
 
-	r.seqNr++
-	frag, err := BuildFragment(r.seqNr, r.dts, dur, isIDR, avcc)
-	if err != nil {
-		r.logger.Printf("recording fragment build failed: %v", err)
-		return
-	}
-	if _, err := r.file.Write(frag); err != nil {
-		r.logger.Printf("recording fragment write failed: %v", err)
-		return
-	}
-	now := time.Now()
-	if r.actualStartAt.IsZero() {
-		r.actualStartAt = now
-	}
-	r.actualStopAt = now
-	r.bytesWritten.Add(int64(len(frag)))
-	r.dts += uint64(dur)
+	r.lastDur = dur
+	r.writeFragmentLocked(avcc, dur, isIDR, "recording fragment")
 }
 
 func (r *Recorder) cacheSampleLocked(avcc []byte, dur uint32, isIDR bool) {
@@ -258,32 +257,61 @@ func (r *Recorder) writePrebufferLocked() bool {
 	return true
 }
 
-func (r *Recorder) OnOffline() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.active {
-		return
-	}
-	if r.offlineMode != "stop" {
-		return
-	}
-	if r.file != nil {
-		_ = r.file.Close()
-		r.file = nil
-	}
-	if r.requestedStopAt.IsZero() {
-		r.requestedStopAt = time.Now()
-	}
-	r.active = false
-	r.logger.Printf("recording stopped due to offline source: %s", r.path)
-}
-
 func (r *Recorder) Stop() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.requestedStopAt = time.Now()
 
+	return r.closeLocked()
+}
+
+func (r *Recorder) SetSourceInfo(codec string, width, height int, frameRate float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.codec = strings.ToLower(strings.TrimSpace(codec))
+	r.width = width
+	r.height = height
+	r.frameRate = frameRate
+}
+
+func (r *Recorder) ensureInitWrittenLocked() bool {
+	if r.initWritten {
+		return true
+	}
+	if len(r.initData) == 0 || r.file == nil {
+		return false
+	}
+	if _, err := r.file.Write(r.initData); err != nil {
+		r.logger.Printf("recording init write failed: %v", err)
+		return false
+	}
+	r.bytesWritten.Add(int64(len(r.initData)))
+	r.initWritten = true
+	return true
+}
+
+func (r *Recorder) writeFragmentLocked(avcc []byte, dur uint32, isIDR bool, logPrefix string) bool {
+	r.seqNr++
+	frag, err := BuildFragment(r.seqNr, r.dts, dur, isIDR, avcc)
+	if err != nil {
+		r.logger.Printf("%s build failed: %v", logPrefix, err)
+		return false
+	}
+	if _, err := r.file.Write(frag); err != nil {
+		r.logger.Printf("%s write failed: %v", logPrefix, err)
+		return false
+	}
+	now := time.Now()
+	if r.actualStartAt.IsZero() {
+		r.actualStartAt = now
+	}
+	r.actualStopAt = now
+	r.bytesWritten.Add(int64(len(frag)))
+	r.dts += uint64(dur)
+	return true
+}
+
+func (r *Recorder) closeLocked() error {
 	if r.file != nil {
 		if err := r.file.Close(); err != nil {
 			return err
@@ -292,6 +320,8 @@ func (r *Recorder) Stop() error {
 	}
 	r.active = false
 	r.waitForIDR = false
+	r.offlineGap = false
+	r.stopOfflineGeneratorLocked()
 	return nil
 }
 

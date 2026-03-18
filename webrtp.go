@@ -16,6 +16,26 @@ type Logger interface {
 	Printf(format string, v ...interface{})
 }
 
+type Keyframe struct {
+	StreamName  string
+	FrameNo     uint32
+	Codec       string
+	Format      string
+	Width       int
+	Height      int
+	Payload     []byte
+	Distort     bool
+	DeskEnabled bool
+	Fx          float64
+	Fy          float64
+	Scale       float64
+	PublishedAt time.Time
+}
+
+type Keyframer interface {
+	HandleKeyframe(frame *Keyframe) error
+}
+
 type Config struct {
 	SourceType        string
 	StreamName        string
@@ -23,6 +43,7 @@ type Config struct {
 	Device            string
 	Path              string
 	Codec             string
+	H264Profile       string
 	Width             int
 	Height            int
 	FrameRate         float64
@@ -32,6 +53,7 @@ type Config struct {
 	KeyframeFormat    string
 	KeyframeMqttURL   string
 	KeyframeMqttTopic string
+	Keyframer         Keyframer
 	Logger            Logger
 	WriteTimeout      time.Duration
 	ReadBufferSize    int
@@ -85,6 +107,7 @@ func Init(cfg *Config) *Instance {
 			Device:            cfg.Device,
 			Path:              cfg.Path,
 			Codec:             strings.ToLower(strings.TrimSpace(cfg.Codec)),
+			H264Profile:       strings.ToLower(strings.TrimSpace(cfg.H264Profile)),
 			Width:             cfg.Width,
 			Height:            cfg.Height,
 			FrameRate:         cfg.FrameRate,
@@ -94,6 +117,7 @@ func Init(cfg *Config) *Instance {
 			KeyframeFormat:    strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat)),
 			KeyframeMqttURL:   strings.TrimSpace(cfg.KeyframeMqttURL),
 			KeyframeMqttTopic: strings.TrimSpace(cfg.KeyframeMqttTopic),
+			Keyframer:         cfg.Keyframer,
 			Logger:            logger,
 			WriteTimeout:      writeTimeout,
 			ReadBufferSize:    readBuf,
@@ -103,10 +127,15 @@ func Init(cfg *Config) *Instance {
 		logger:   logger,
 		recorder: NewRecorder(logger),
 	}
-	if inst.cfg.KeyframeSink != "" {
-		inst.keyframes = newKeyframeSink(inst.cfg, logger)
-	}
+	inst.ensureKeyframeSink()
 	return inst
+}
+
+func (r *Instance) ensureKeyframeSink() {
+	if r == nil || r.keyframes != nil || strings.TrimSpace(r.cfg.KeyframeSink) == "" {
+		return
+	}
+	r.keyframes = newKeyframeSink(r.cfg, r.logger)
 }
 
 func (r *Instance) InstanceReady() bool {

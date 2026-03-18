@@ -22,11 +22,6 @@ import (
 	"unsafe"
 )
 
-type nativeH264FrameEncoder interface {
-	Encode(*image.RGBA) ([]byte, error)
-	Close() error
-}
-
 type mediaFoundationH264FrameEncoder struct {
 	ref C.WebrtpMFH264EncoderRef
 }

@@ -1,4 +1,4 @@
-//go:build !windows || !cgo
+//go:build !cgo || (!windows && !darwin && !linux)
 
 package webrtp
 
@@ -13,5 +13,5 @@ type nativeH264FrameEncoder interface {
 }
 
 func newNativeH264FrameEncoder() (nativeH264FrameEncoder, error) {
-	return nil, fmt.Errorf("native h264 frame encoder is only available on windows cgo builds")
+	return nil, fmt.Errorf("native h264 frame encoder is only available on windows/darwin/linux cgo builds")
 }

@@ -3,6 +3,7 @@ package webrtp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -21,6 +22,7 @@ type fileConn struct {
 	cmd          *exec.Cmd
 	done         chan struct{}
 	playlistPath string
+	statePath    string
 	closeOnce    sync.Once
 }
 
@@ -74,6 +76,19 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 
 	fileCtx, cancel := context.WithCancel(ctx)
 	if sourceKind == fileSourceKindRawH264 {
+		if r.cfg.H264Profile != "" {
+			if len(files) != 1 {
+				cancel()
+				if playlistPath != "" {
+					_ = os.Remove(playlistPath)
+				}
+				return nil, fmt.Errorf("h264Profile transcoding for raw .h264 inputs currently supports a single file path")
+			}
+			if playlistPath != "" {
+				_ = os.Remove(playlistPath)
+			}
+			return r.connectFileFFmpeg(fileCtx, cancel, sourcePath, rawH264FFmpegArgs(files[0], r.cfg, fps), fps, frameDur, 1, ""), nil
+		}
 		if playlistPath != "" {
 			_ = os.Remove(playlistPath)
 		}
@@ -81,14 +96,19 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 	}
 
 	args := fileFFmpegArgs(files, playlistPath, r.cfg, fps)
-	cmd := exec.CommandContext(fileCtx, "ffmpeg", args...)
+	return r.connectFileFFmpeg(fileCtx, cancel, sourcePath, args, fps, frameDur, len(files), playlistPath), nil
+}
+
+func (r *Instance) connectFileFFmpeg(ctx context.Context, cancel context.CancelFunc, sourcePath string, args []string, fps float64, frameDur uint32, fileCount int, playlistPath string) *fileConn {
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		if playlistPath != "" {
 			_ = os.Remove(playlistPath)
 		}
-		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+		r.logger.Printf("ffmpeg stdout pipe: %v", err)
+		return &fileConn{cancel: cancel, done: closedDone(), playlistPath: playlistPath}
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -96,14 +116,16 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 		if playlistPath != "" {
 			_ = os.Remove(playlistPath)
 		}
-		return nil, fmt.Errorf("ffmpeg stderr pipe: %w", err)
+		r.logger.Printf("ffmpeg stderr pipe: %v", err)
+		return &fileConn{cancel: cancel, done: closedDone(), playlistPath: playlistPath}
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		if playlistPath != "" {
 			_ = os.Remove(playlistPath)
 		}
-		return nil, fmt.Errorf("ffmpeg start: %w", err)
+		r.logger.Printf("ffmpeg start: %v", err)
+		return &fileConn{cancel: cancel, done: closedDone(), playlistPath: playlistPath}
 	}
 
 	conn := &fileConn{
@@ -114,7 +136,7 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 	}
 	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 
-	r.logger.Printf("file stream active (%s, fps=%.2f, files=%d)", sourcePath, fps, len(files))
+	r.logger.Printf("file stream active (%s, fps=%.2f, files=%d)", sourcePath, fps, fileCount)
 
 	go func() {
 		scanner := bufio.NewScanner(stderr)
@@ -137,7 +159,7 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 		for {
 			au, err := reader.Next()
 			if err != nil {
-				if err != io.EOF && fileCtx.Err() == nil {
+				if err != io.EOF && ctx.Err() == nil {
 					r.logger.Printf("file source read failed: %v", err)
 				}
 				break
@@ -149,24 +171,30 @@ func (r *Instance) connectFile(ctx context.Context) (*fileConn, error) {
 			ts += frameDur
 		}
 
-		if err := cmd.Wait(); err != nil && fileCtx.Err() == nil {
+		if err := cmd.Wait(); err != nil && ctx.Err() == nil {
 			r.logger.Printf("ffmpeg exited: %v", err)
 		}
 	}()
 
-	return conn, nil
+	return conn
 }
 
 func (r *Instance) connectRawH264Files(ctx context.Context, cancel context.CancelFunc, sourcePath string, files []string, fps float64, frameDur uint32) *fileConn {
+	statePath := rawH264StatePath(sourcePath)
 	conn := &fileConn{
-		cancel: cancel,
-		done:   make(chan struct{}),
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		statePath: statePath,
 	}
 	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
 	frameDelay := time.Duration(float64(time.Second) / fps)
 	if frameDelay <= 0 {
 		frameDelay = time.Second / 30
 	}
+	resume := loadRawH264ResumeState(statePath, files)
+		if resume != nil {
+			r.logger.Printf("raw h264 resume state loaded (%s, accessUnit=%d, lastIDR=%d)", resume.File, resume.AccessUnit, resume.LastIDR)
+		}
 
 	r.logger.Printf("raw h264 file stream active (%s, fps=%.2f, files=%d)", sourcePath, fps, len(files))
 
@@ -175,9 +203,21 @@ func (r *Instance) connectRawH264Files(ctx context.Context, cancel context.Cance
 		defer conn.Close()
 
 		ts := uint32(0)
+		startIndex := 0
+		if resume != nil {
+			startIndex = resume.FileIndex
+		}
 		for {
-			for _, path := range files {
-				if err := r.streamRawH264File(ctx, handler, path, frameDur, frameDelay, &ts); err != nil {
+			for offset := 0; offset < len(files); offset++ {
+				fileIndex := (startIndex + offset) % len(files)
+				path := files[fileIndex]
+				startAU := uint64(0)
+				targetAU := uint64(0)
+				if resume != nil && fileIndex == resume.FileIndex {
+					startAU = resume.LastIDR
+					targetAU = resume.AccessUnit
+				}
+				if err := r.streamRawH264File(ctx, handler, path, fileIndex, startAU, targetAU, frameDur, frameDelay, &ts, statePath); err != nil {
 					if err == context.Canceled || ctx.Err() != nil {
 						return
 					}
@@ -185,13 +225,15 @@ func (r *Instance) connectRawH264Files(ctx context.Context, cancel context.Cance
 					return
 				}
 			}
+			startIndex = 0
+			resume = nil
 		}
 	}()
 
 	return conn
 }
 
-func (r *Instance) streamRawH264File(ctx context.Context, handler *videoHandler, path string, frameDur uint32, frameDelay time.Duration, ts *uint32) error {
+func (r *Instance) streamRawH264File(ctx context.Context, handler *videoHandler, path string, fileIndex int, startAU uint64, targetAU uint64, frameDur uint32, frameDelay time.Duration, ts *uint32, statePath string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open raw h264 file: %w", err)
@@ -199,6 +241,8 @@ func (r *Instance) streamRawH264File(ctx context.Context, handler *videoHandler,
 	defer file.Close()
 
 	reader := newH264AccessUnitReader(file)
+	currentAU := uint64(0)
+	lastIDR := uint64(0)
 	for {
 		select {
 		case <-ctx.Done():
@@ -216,9 +260,33 @@ func (r *Instance) streamRawH264File(ctx context.Context, handler *videoHandler,
 		if len(au) == 0 {
 			continue
 		}
+		isIDR := rawH264AccessUnitIsIDR(au)
+		if isIDR {
+			lastIDR = currentAU
+		}
+		if currentAU < startAU {
+			currentAU++
+			continue
+		}
+		if targetAU > startAU && currentAU < targetAU {
+			currentAU++
+			handler.processH264Warmup(au, *ts, nil, nil)
+			*ts += frameDur
+			continue
+		}
 
+		currentAU++
 		handler.processH264(au, *ts, nil, nil)
 		*ts += frameDur
+		state := rawH264ResumeState{
+			File:       path,
+			FileIndex:  fileIndex,
+			AccessUnit: currentAU,
+			LastIDR:    lastIDR,
+		}
+		if isIDR {
+			saveRawH264ResumeState(statePath, state)
+		}
 
 		timer := time.NewTimer(frameDelay)
 		select {
@@ -226,10 +294,23 @@ func (r *Instance) streamRawH264File(ctx context.Context, handler *videoHandler,
 			if !timer.Stop() {
 				<-timer.C
 			}
+			saveRawH264ResumeState(statePath, state)
 			return context.Canceled
 		case <-timer.C:
 		}
 	}
+}
+
+func rawH264AccessUnitIsIDR(au [][]byte) bool {
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			continue
+		}
+		if (nalu[0] & 0x1F) == 5 {
+			return true
+		}
+	}
+	return false
 }
 
 func fileSourceInputs(sourcePath string) ([]string, string, error) {
@@ -361,6 +442,62 @@ func parseFFmpegRate(value string) float64 {
 	return fps
 }
 
+type rawH264ResumeState struct {
+	File       string `json:"file"`
+	FileIndex  int    `json:"fileIndex"`
+	AccessUnit uint64 `json:"accessUnit"`
+	LastIDR    uint64 `json:"lastIdr"`
+}
+
+func rawH264StatePath(sourcePath string) string {
+	info, err := os.Stat(sourcePath)
+	if err == nil && info.IsDir() {
+		return filepath.Join(sourcePath, ".webrtp-raw-h264-state.json")
+	}
+	return sourcePath + ".webrtp-state.json"
+}
+
+func loadRawH264ResumeState(path string, files []string) *rawH264ResumeState {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var state rawH264ResumeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	if state.File != "" {
+		for index, file := range files {
+			if file == state.File {
+				state.FileIndex = index
+				if state.LastIDR > state.AccessUnit {
+					state.LastIDR = 0
+				}
+				return &state
+			}
+		}
+	}
+	if state.FileIndex >= 0 && state.FileIndex < len(files) {
+		state.File = files[state.FileIndex]
+		if state.LastIDR > state.AccessUnit {
+			state.LastIDR = 0
+		}
+		return &state
+	}
+	return nil
+}
+
+func saveRawH264ResumeState(path string, state rawH264ResumeState) {
+	if path == "" {
+		return
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o644)
+}
+
 func fileFFmpegArgs(files []string, playlistPath string, cfg *Config, fps float64) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-re", "-stream_loop", "-1"}
 	if playlistPath != "" {
@@ -376,6 +513,9 @@ func fileFFmpegArgs(files []string, playlistPath string, cfg *Config, fps float6
 		args = append(args, "-r", strconv.FormatFloat(cfg.FrameRate, 'f', -1, 64))
 	}
 	args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p")
+	if cfg.H264Profile != "" {
+		args = append(args, "-profile:v", cfg.H264Profile)
+	}
 	if cfg.BitrateKbps > 0 {
 		bitrate := fmt.Sprintf("%dk", cfg.BitrateKbps)
 		args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", fmt.Sprintf("%dk", cfg.BitrateKbps*2))
@@ -384,8 +524,50 @@ func fileFFmpegArgs(files []string, playlistPath string, cfg *Config, fps float6
 	if gop < 1 {
 		gop = 60
 	}
-	args = append(args, "-g", strconv.Itoa(gop), "-keyint_min", strconv.Itoa(gop), "-bf", "0", "-x264-params", "repeat-headers=1:aud=1:scenecut=0", "-f", "h264", "-")
+	x264Params := []string{"repeat-headers=1", "aud=1", "scenecut=0"}
+	if cfg.H264Profile == "baseline" {
+		x264Params = append(x264Params, "cabac=0")
+	}
+	args = append(args, "-g", strconv.Itoa(gop), "-keyint_min", strconv.Itoa(gop), "-bf", "0", "-x264-params", strings.Join(x264Params, ":"), "-f", "h264", "-")
 	return args
+}
+
+func rawH264FFmpegArgs(file string, cfg *Config, fps float64) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning", "-re"}
+	if fps > 0 {
+		args = append(args, "-framerate", strconv.FormatFloat(fps, 'f', -1, 64))
+	}
+	args = append(args, "-f", "h264", "-i", file, "-map", "0:v:0", "-an")
+	if cfg.Width > 0 && cfg.Height > 0 {
+		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", cfg.Width, cfg.Height))
+	}
+	if cfg.FrameRate > 0 {
+		args = append(args, "-r", strconv.FormatFloat(cfg.FrameRate, 'f', -1, 64))
+	}
+	args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p")
+	if cfg.H264Profile != "" {
+		args = append(args, "-profile:v", cfg.H264Profile)
+	}
+	if cfg.BitrateKbps > 0 {
+		bitrate := fmt.Sprintf("%dk", cfg.BitrateKbps)
+		args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", fmt.Sprintf("%dk", cfg.BitrateKbps*2))
+	}
+	gop := int(math.Round(fps * 2))
+	if gop < 1 {
+		gop = 60
+	}
+	x264Params := []string{"repeat-headers=1", "aud=1", "scenecut=0"}
+	if cfg.H264Profile == "baseline" {
+		x264Params = append(x264Params, "cabac=0")
+	}
+	args = append(args, "-g", strconv.Itoa(gop), "-keyint_min", strconv.Itoa(gop), "-bf", "0", "-x264-params", strings.Join(x264Params, ":"), "-f", "h264", "-")
+	return args
+}
+
+func closedDone() chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 type h264AccessUnitReader struct {

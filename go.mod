@@ -1,4 +1,4 @@
-module github.com/connectedtechco/go-webrtp
+module github.com/bronystylecrazy/go-webrtp
 
 go 1.25.0
 

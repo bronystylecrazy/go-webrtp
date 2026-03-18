@@ -7,13 +7,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/connectedtechco/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp/streamcore"
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 )
 
 type StatusSocketMessage struct {
-	Streams []*StreamApiResponse `json:"streams"`
+	Streams []*streamcore.StreamResponse `json:"streams"`
 }
 
 type DashboardRow struct {
@@ -176,7 +177,7 @@ func DeskViewSocketHandler(broker *DeskViewSocketBroker) fiber.Handler {
 	}
 }
 
-func StatusSocketHandler(manager *StreamManager) fiber.Handler {
+func StatusSocketHandler(manager *streamcore.Manager) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
@@ -195,8 +196,8 @@ func StatusSocketHandler(manager *StreamManager) fiber.Handler {
 			}()
 
 			send := func() error {
-				items := manager.StreamStatusList()
-				StreamResponsesSort(items)
+				items := manager.ListResponses()
+				streamcore.SortResponses(items)
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				return conn.WriteJSON(&StatusSocketMessage{Streams: items})
 			}
@@ -221,7 +222,7 @@ func StatusSocketHandler(manager *StreamManager) fiber.Handler {
 	}
 }
 
-func DashboardSocketHandler(manager *StreamManager) fiber.Handler {
+func DashboardSocketHandler(manager *streamcore.Manager) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
@@ -240,7 +241,7 @@ func DashboardSocketHandler(manager *StreamManager) fiber.Handler {
 			}()
 
 			send := func() error {
-				streams := manager.StreamListExpanded()
+				streams := manager.ListExpanded()
 				rows := make([]*DashboardRow, 0, len(streams))
 				for _, stream := range streams {
 					stats := stream.Hub.GetStats(tuiStreamDisplayName(stream))

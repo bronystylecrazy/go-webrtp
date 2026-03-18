@@ -38,10 +38,16 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 	}()
 
 	initData := hub.GetInit()
+	waitTicker := time.NewTicker(100 * time.Millisecond)
+	defer waitTicker.Stop()
+	waitingLogged := false
 	for initData == nil {
-		r.logger.Printf("stream not ready, waiting %s", conn.RemoteAddr())
+		if !waitingLogged {
+			r.logger.Printf("stream not ready, waiting %s", conn.RemoteAddr())
+			waitingLogged = true
+		}
 		select {
-		case <-time.After(100 * time.Millisecond):
+		case <-waitTicker.C:
 			initData = hub.GetInit()
 		case <-done:
 			r.logger.Printf("client disconnected while waiting: %s", conn.RemoteAddr())

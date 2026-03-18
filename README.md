@@ -10,22 +10,22 @@ Golang library for streaming video from RTSP or native USB camera sources direct
 
 ### Download Binary
 
-Download the latest release binary from [GitHub Releases](https://github.com/connectedtechco/go-webrtp/releases):
+Download the latest release binary from [GitHub Releases](https://github.com/bronystylecrazy/go-webrtp/releases):
 
 - macOS (Apple Silicon)
    ```bash
-   curl -L -o webrtp https://github.com/connectedtechco/go-webrtp/releases/latest/download/webrtp-darwin-arm64
+   curl -L -o webrtp https://github.com/bronystylecrazy/go-webrtp/releases/latest/download/webrtp-darwin-arm64
    chmod +x webrtp
    ```
   
 - Linux (x64)
    ```bash
-   curl -L -o webrtp https://github.com/connectedtechco/go-webrtp/releases/latest/download/webrtp-linux-amd64
+   curl -L -o webrtp https://github.com/bronystylecrazy/go-webrtp/releases/latest/download/webrtp-linux-amd64
    chmod +x webrtp
    ```
 - Windows (x64)
    ```powershell
-   Invoke-WebRequest -Uri "https://github.com/connectedtechco/go-webrtp/releases/latest/download/webrtp-windows-amd64.exe" -OutFile webrtp.exe
+   Invoke-WebRequest -Uri "https://github.com/bronystylecrazy/go-webrtp/releases/latest/download/webrtp-windows-amd64.exe" -OutFile webrtp.exe
    ```
 
 ### Run Server
@@ -54,6 +54,7 @@ upstreams:
   - name: camera1
     enabled: true
     rtspUrl: rtsp://192.168.1.100:554/stream
+    h264Profile: baseline
   - name: usbCamera
     sourceType: usb
     enabled: true
@@ -71,10 +72,19 @@ upstreams:
     sourceType: file
     enabled: true
     path: ./test.mkv
+    h264Profile: baseline
     onDemand: true
 ```
 
 `sourceType` defaults to `rtsp`.
+
+For RTSP sources:
+
+- `rtspUrl` is required
+- `h264Profile` is optional and supports `baseline`, `main`, or `high`
+- when `h264Profile: baseline` is set, `go-webrtp` transcodes the RTSP stream through `ffmpeg`/`libx264` before publishing it
+- the RTSP baseline transcode path requires `ffmpeg` with `libx264` available on `PATH`
+- `width`, `height`, `frameRate`, and `bitrateKbps` act as optional transcode output controls when the baseline path is used
 
 For file sources:
 
@@ -84,6 +94,7 @@ For file sources:
 - for raw `.h264` / `.264`, set `frameRate` to control playback pacing
 - when `path` is a directory, supported files are sorted by name and looped continuously
 - file sources are transcoded to H264 with `ffmpeg`, so `ffmpeg` and `ffprobe` must be available on `PATH`
+- `h264Profile` is optional and supports `baseline`, `main`, or `high` for the `libx264` output profile
 - `width`, `height`, `frameRate`, and `bitrateKbps` are optional output controls for the mock stream
 - `onDemand` is optional; when `true`, playback starts on first viewer and stops a few seconds after the last viewer disconnects
 - `keyframeSink` is optional and currently supports `fs`
@@ -98,6 +109,7 @@ For USB sources:
 - `device` accepts `default`, the macOS camera name, or the macOS device unique ID
 - `enabled` is optional and defaults to `true`
 - `codec` must be `h264` or `h265`
+- `h264Profile` is optional and supports `baseline`, `main`, or `high`
 - `frameRate` is optional
 - `bitrateKbps` is optional
 - `onDemand` is optional; when `true`, renditions start on first viewer and stop a few seconds after the last viewer disconnects
@@ -150,7 +162,8 @@ Example request body:
   "name": "camera2",
   "sourceType": "rtsp",
   "enabled": true,
-  "rtspUrl": "rtsp://192.168.1.101:554/stream"
+  "rtspUrl": "rtsp://192.168.1.101:554/stream",
+  "h264Profile": "baseline"
 }
 ```
 
@@ -180,6 +193,7 @@ File example:
   "sourceType": "file",
   "enabled": true,
   "path": "./test.mkv",
+  "h264Profile": "baseline",
   "onDemand": true
 }
 ```
@@ -208,7 +222,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/connectedtechco/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 )

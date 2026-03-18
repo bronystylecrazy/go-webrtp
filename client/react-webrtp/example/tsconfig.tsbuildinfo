@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","../src/backgroundplayer.tsx","../src/deskcalibration.tsx","../src/deskview.tsx","../src/videoplayer.tsx","../src/webrtpprovider.tsx","../src/canvasmesh.ts","../src/client.ts","../src/desktransform.ts","../src/deskview-entry.ts","../src/effectrenderer.ts","../src/index.ts","../src/version.ts"],"version":"5.9.3"}

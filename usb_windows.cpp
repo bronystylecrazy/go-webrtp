@@ -29,6 +29,7 @@ struct WinCapture {
     uintptr_t handle;
     std::wstring device;
     std::wstring codec;
+    std::wstring h264Profile;
     int width;
     int height;
     double fps;
@@ -72,7 +73,18 @@ struct H264EncoderContext {
     uint32_t nalLengthSize;
     bool streamingBegun;
     LONGLONG nextForcedKeyframeTime;
+    UINT32 profile;
 };
+
+UINT32 H264ProfileValue(const std::wstring &profile) {
+    if (_wcsicmp(profile.c_str(), L"baseline") == 0) {
+        return 66;
+    }
+    if (_wcsicmp(profile.c_str(), L"high") == 0) {
+        return 100;
+    }
+    return 77;
+}
 
 std::wstring Utf8ToWide(const char *src) {
     if (src == nullptr || src[0] == '\0') {
@@ -764,7 +776,7 @@ UINT32 DefaultH264Bitrate(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fps
     return static_cast<UINT32>(bits);
 }
 
-HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fpsDen, UINT32 bitrate, GUID inputSubtype, H264EncoderContext *ctx) {
+HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fpsDen, UINT32 bitrate, UINT32 profile, GUID inputSubtype, H264EncoderContext *ctx) {
     if (ctx == nullptr) {
         return E_POINTER;
     }
@@ -777,6 +789,7 @@ HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fps
     ctx->inputSubtype = inputSubtype;
     ctx->nalLengthSize = 4;
     ctx->nextForcedKeyframeTime = 0;
+    ctx->profile = profile != 0 ? profile : 77;
 
     HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&ctx->transform));
     if (FAILED(hr) || ctx->transform == nullptr) {
@@ -792,6 +805,7 @@ HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fps
     if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(outputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     if (SUCCEEDED(hr)) hr = outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     if (SUCCEEDED(hr)) hr = outputType->SetUINT32(MF_MT_AVG_BITRATE, ctx->bitrate);
+    if (SUCCEEDED(hr)) hr = outputType->SetUINT32(MF_MT_MPEG2_PROFILE, ctx->profile);
     if (SUCCEEDED(hr)) hr = ctx->transform->SetOutputType(0, outputType, 0);
     if (FAILED(hr)) {
         SafeRelease(&outputType);
@@ -837,6 +851,11 @@ HRESULT CreateH264Encoder(UINT32 width, UINT32 height, UINT32 fpsNum, UINT32 fps
 
         value.ulVal = 1;
         ctx->codecApi->SetValue(&CODECAPI_AVLowLatencyMode, &value);
+
+        value.ulVal = ctx->profile;
+#ifdef CODECAPI_AVEncH264VProfile
+        ctx->codecApi->SetValue(&CODECAPI_AVEncH264VProfile, &value);
+#endif
 
         VariantClear(&value);
     }
@@ -1010,10 +1029,14 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
             break;
         }
 
-        MediaTypeSelection selection = {};
         subtype = (_wcsicmp(capture->codec.c_str(), L"h265") == 0) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
-        hr = SelectCompressedMediaType(reader, subtype, capture->width, capture->height, capture->fps, &selection);
-        if (FAILED(hr)) {
+        const bool forceH264Encoder = GuidEqual(subtype, MFVideoFormat_H264) && !capture->h264Profile.empty();
+        HRESULT compressedHr = E_FAIL;
+        MediaTypeSelection selection = {};
+        if (!forceH264Encoder) {
+            compressedHr = SelectCompressedMediaType(reader, subtype, capture->width, capture->height, capture->fps, &selection);
+        }
+        if (forceH264Encoder || FAILED(compressedHr)) {
             if (!GuidEqual(subtype, MFVideoFormat_H264)) {
                 capture->error = WideToUtf8String(L"device does not expose native " + capture->codec + L" output");
                 break;
@@ -1029,7 +1052,8 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
                 break;
             }
             UINT32 bitrate = capture->bitrateKbps > 0 ? static_cast<UINT32>(capture->bitrateKbps) * 1000U : 0U;
-            hr = CreateH264Encoder(rawSelection.width, rawSelection.height, rawSelection.fpsNum, rawSelection.fpsDen, bitrate, rawSelection.outputSubtype, &encoder);
+            const UINT32 profile = H264ProfileValue(capture->h264Profile);
+            hr = CreateH264Encoder(rawSelection.width, rawSelection.height, rawSelection.fpsNum, rawSelection.fpsDen, bitrate, profile, rawSelection.outputSubtype, &encoder);
             if (FAILED(hr)) {
                 capture->error = WideToUtf8String(CaptureErrorMessage(hr, "create h264 encoder"));
                 break;
@@ -1134,7 +1158,7 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
 
 }  // namespace
 
-extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
+extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
     WinCapture *capture = new WinCapture();
     capture->thread = nullptr;
     capture->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1142,6 +1166,7 @@ extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec,
     capture->handle = handle;
     capture->device = Utf8ToWide(device);
     capture->codec = Utf8ToWide(codec);
+    capture->h264Profile = Utf8ToWide(h264Profile);
     capture->width = width;
     capture->height = height;
     capture->fps = fps;
