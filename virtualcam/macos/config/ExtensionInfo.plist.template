@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>__EXTENSION_EXECUTABLE__</string>
+	<key>CFBundleIdentifier</key>
+	<string>__EXTENSION_BUNDLE_ID__</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>__EXTENSION_NAME__</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.3</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>__SYSTEM_EXTENSION_USAGE_DESCRIPTION__</string>
+	<key>CMIOExtension</key>
+	<dict>
+		<key>CMIOExtensionMachServiceName</key>
+		<string>__CMIO_MACH_SERVICE_NAME__</string>
+	</dict>
+</dict>
+</plist>
