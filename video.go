@@ -94,6 +94,12 @@ func (r *videoHandler) processH264WithOptions(au [][]byte, ts uint32, spsBase, p
 	if len(inPPS) > 0 {
 		r.h264PPS = append([]byte(nil), inPPS...)
 	}
+	if r.instance != nil && r.instance.cfg != nil && r.instance.cfg.H264AccessUnitHandler != nil {
+		r.instance.cfg.H264AccessUnitHandler(cloneH264AccessUnit(H264AccessUnit{
+			NALUs:  au,
+			PTS90k: ts,
+		}))
+	}
 	if r.hub.GetInit() == nil {
 		sps := spsBase
 		pps := ppsBase

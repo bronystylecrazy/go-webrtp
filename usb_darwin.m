@@ -127,6 +127,35 @@ static NSString *WebrtpUsbMacPixelFormatName(OSType pixelFormat) {
     }
 }
 
+static NSString *WebrtpUsbMacFFmpegPixelFormatName(OSType pixelFormat) {
+    switch (pixelFormat) {
+        case kCVPixelFormatType_422YpCbCr8:
+            return @"uyvy422";
+        case kCVPixelFormatType_422YpCbCr8_yuvs:
+            return @"yuyv422";
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+            return @"nv12";
+        case kCVPixelFormatType_32ARGB:
+            return @"0rgb";
+        case kCVPixelFormatType_32BGRA:
+            return @"bgr0";
+        default:
+            return nil;
+    }
+}
+
+static NSInteger WebrtpUsbMacFFmpegPixelFormatRank(NSString *name, int width, int height) {
+    NSArray<NSString *> *preferred = (width > 1920 || height > 1080)
+        ? @[@"uyvy422", @"nv12", @"yuyv422", @"0rgb", @"bgr0"]
+        : @[@"nv12", @"uyvy422", @"yuyv422", @"0rgb", @"bgr0"];
+    NSUInteger idx = [preferred indexOfObject:name ?: @""];
+    if (idx == NSNotFound) {
+        return NSIntegerMax;
+    }
+    return (NSInteger) idx;
+}
+
 static void WebrtpUsbMacCompressionOutput(void *outputCallbackRefCon, void *sourceFrameRefCon, OSStatus status, VTEncodeInfoFlags infoFlags, CMSampleBufferRef sampleBuffer) {
     WebrtpUsbMacCapture *capture = (__bridge WebrtpUsbMacCapture *) outputCallbackRefCon;
     if (status != noErr) {
@@ -571,11 +600,16 @@ char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut) {
                 int width = [mode[@"width"] intValue];
                 int height = [mode[@"height"] intValue];
                 NSMutableOrderedSet<NSNumber *> *fpsSet = [NSMutableOrderedSet orderedSet];
+                NSMutableOrderedSet<NSString *> *pixelFormatSet = [NSMutableOrderedSet orderedSet];
                 for (AVCaptureDeviceFormat *format in selected.formats) {
                     CMFormatDescriptionRef desc = format.formatDescription;
                     CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
                     if (dims.width != width || dims.height != height) {
                         continue;
+                    }
+                    NSString *pixelFormat = WebrtpUsbMacFFmpegPixelFormatName(CMFormatDescriptionGetMediaSubType(desc));
+                    if (pixelFormat.length > 0) {
+                        [pixelFormatSet addObject:pixelFormat];
                     }
                     for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
                         double maxFps = range.maxFrameRate;
@@ -594,10 +628,26 @@ char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut) {
                 [fps sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
                     return [a compare:b];
                 }];
+                NSMutableArray *pixelFormats = [NSMutableArray array];
+                for (NSString *value in pixelFormatSet) {
+                    [pixelFormats addObject:value];
+                }
+                [pixelFormats sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                    NSInteger rankA = WebrtpUsbMacFFmpegPixelFormatRank(a, width, height);
+                    NSInteger rankB = WebrtpUsbMacFFmpegPixelFormatRank(b, width, height);
+                    if (rankA == rankB) {
+                        return [a compare:b];
+                    }
+                    if (rankA < rankB) {
+                        return NSOrderedAscending;
+                    }
+                    return NSOrderedDescending;
+                }];
                 [modes addObject:@{
                     @"width": @(width),
                     @"height": @(height),
-                    @"fps": fps
+                    @"fps": fps,
+                    @"pixelFormats": pixelFormats
                 }];
             }
         }

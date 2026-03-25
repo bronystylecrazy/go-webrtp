@@ -37,6 +37,48 @@ func (c *captureKeyframer) HandleKeyframe(frame *Keyframe) error {
 	return nil
 }
 
+func TestPublishH264AccessUnitInvokesRawHandler(t *testing.T) {
+	received := make(chan H264AccessUnit, 1)
+	inst := Init(&Config{
+		Logger: stdLogger{},
+		H264AccessUnitHandler: func(au H264AccessUnit) {
+			received <- au
+		},
+	})
+
+	source := [][]byte{{0x67, 0x01, 0x02}, {0x68, 0x03}}
+	inst.PublishH264AccessUnit(source, 9000)
+
+	select {
+	case got := <-received:
+		if got.PTS90k != 9000 {
+			t.Fatalf("unexpected pts: %d", got.PTS90k)
+		}
+		if len(got.NALUs) != 2 {
+			t.Fatalf("unexpected nalu count: %d", len(got.NALUs))
+		}
+		source[0][0] = 0x00
+		if got.NALUs[0][0] != 0x67 {
+			t.Fatalf("expected callback to receive a cloned access unit, got %#v", got.NALUs[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected raw h264 callback")
+	}
+}
+
+func TestForceNextKeyFrameDelegatesToSource(t *testing.T) {
+	inst := Init(&Config{Logger: stdLogger{}})
+	conn := &fakeKeyframeRequesterConn{fakeSourceConn: &fakeSourceConn{done: make(chan struct{})}}
+	inst.conn = conn
+
+	if err := inst.ForceNextKeyFrame(); err != nil {
+		t.Fatalf("ForceNextKeyFrame: %v", err)
+	}
+	if conn.forceCalls != 1 {
+		t.Fatalf("expected one keyframe request, got %d", conn.forceCalls)
+	}
+}
+
 func TestWaitForReconnectStopsRecorderOnSourceExit(t *testing.T) {
 	inst := Init(&Config{Logger: stdLogger{}})
 	inst.hub.SetInit([]byte{0x01, 0x02, 0x03})
@@ -244,5 +286,40 @@ func TestKeyframeSinkEmitCustomKeyframeCopiesPayloadAndMetadata(t *testing.T) {
 	payload[0] = 0xff
 	if capture.frame.Payload[0] != 0xaa {
 		t.Fatal("expected payload copy to be isolated from caller mutation")
+	}
+}
+
+func TestPublishH264AccessUnitInvokesCustomKeyframerWithoutSinkTarget(t *testing.T) {
+	capture := &captureKeyframer{}
+	inst := Init(&Config{
+		Logger:         stdLogger{},
+		StreamName:     "full",
+		KeyframeFormat: "h264",
+		Keyframer:      capture,
+	})
+	defer func() {
+		if err := inst.Stop(); err != nil {
+			t.Fatalf("stop instance: %v", err)
+		}
+	}()
+	if err := inst.UpdateKeyframeCalibration(false, false, 0, 0, 1, ""); err != nil {
+		t.Fatalf("disable keyframe transforms: %v", err)
+	}
+
+	inst.PublishH264AccessUnit(testH264IDRAccessUnit(), 9000)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for capture.frame == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if capture.frame == nil {
+		t.Fatal("expected custom keyframer to receive a frame without keyframeSink targets")
+	}
+	if capture.frame.StreamName != "full" || capture.frame.Format != "h264" {
+		t.Fatalf("unexpected keyframe payload metadata: %+v", capture.frame)
+	}
+	if len(capture.frame.Payload) == 0 {
+		t.Fatal("expected custom keyframer payload")
 	}
 }

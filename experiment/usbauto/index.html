@@ -1,0 +1,816 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>usbauto Preview</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #2f81f7;
+      --danger: #f85149;
+      --border: #30363d;
+      --ok: #3fb950;
+      --warn: #d29922;
+    }
+    body {
+      margin: 0;
+      font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(circle at top, #1b2430, var(--bg) 45%);
+      color: var(--text);
+    }
+    main {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+    }
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+    h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .grid {
+      display: grid;
+      gap: 20px;
+      grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+      align-items: start;
+    }
+    .panel {
+      background: color-mix(in srgb, var(--panel) 88%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      backdrop-filter: blur(12px);
+    }
+    .stack {
+      display: grid;
+      gap: 20px;
+    }
+    .media-card {
+      display: grid;
+      gap: 12px;
+    }
+    .media-header {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    .media-note {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
+    .player {
+      width: 100%;
+      background: #000;
+      border-radius: 12px;
+      aspect-ratio: 16 / 9;
+      display: block;
+    }
+    .player[hidden] {
+      display: none !important;
+    }
+    .still-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border-radius: 12px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(47, 129, 247, 0.18), transparent 48%),
+        linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),
+        #05080d;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .still-image {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: #000;
+    }
+    .still-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      padding: 20px;
+      text-align: center;
+    }
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 12px;
+    }
+    dt {
+      color: var(--muted);
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .status-ok {
+      color: var(--ok);
+    }
+    .status-warn {
+      color: var(--warn);
+    }
+    .status-err {
+      color: var(--danger);
+    }
+    .controls {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--border);
+      display: grid;
+      gap: 12px;
+    }
+    .controls-title {
+      margin: 0;
+      font-size: 16px;
+    }
+    .controls-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .field-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(13, 17, 23, 0.7);
+      color: var(--text);
+      font: inherit;
+    }
+    input[type="checkbox"] {
+      accent-color: var(--accent);
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .field-grid {
+        grid-template-columns: 1fr;
+      }
+      .media-header {
+        align-items: start;
+        flex-direction: column;
+      }
+      .media-note {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>usbauto Preview</h1>
+    <p>Preview stays live over WebSocket. The best stream also produces an undistorted JPEG snapshot in the browser on each keyframe.</p>
+
+    <div class="grid">
+      <section class="stack">
+        <section class="panel media-card">
+          <div class="media-header">
+            <div>
+              <h2>Preview</h2>
+              <div id="status" class="status-warn">Waiting for stream metadata</div>
+            </div>
+            <div class="media-note">Live preview from the preview branch</div>
+          </div>
+          <video id="player" class="player" controls autoplay muted playsinline hidden></video>
+          <canvas id="canvas" hidden></canvas>
+        </section>
+
+        <section class="panel media-card">
+          <div class="media-header">
+            <div>
+              <h2>Undistorted Best Frame</h2>
+              <div id="undistortedStatus" class="status-warn">Waiting for first undistorted keyframe</div>
+            </div>
+            <div id="undistortedInfo" class="media-note">Best stream JPEG snapshot</div>
+          </div>
+          <div class="still-wrap">
+            <div id="undistortedEmpty" class="still-empty">No undistorted frame yet. The image updates on the next best-stream keyframe.</div>
+            <img id="undistortedImage" class="still-image" alt="Latest undistorted keyframe" hidden>
+          </div>
+        </section>
+      </section>
+
+      <aside class="panel">
+        <dl>
+          <dt>Device</dt>
+          <dd id="device">-</dd>
+
+          <dt>Source</dt>
+          <dd id="source">-</dd>
+
+          <dt>Preview</dt>
+          <dd id="preview">-</dd>
+
+          <dt>Undistorted</dt>
+          <dd id="undistortedMeta">-</dd>
+
+          <dt>Codec</dt>
+          <dd id="codec">-</dd>
+
+          <dt>MIME</dt>
+          <dd><code id="mime">-</code></dd>
+
+          <dt>AI Frames</dt>
+          <dd id="aiFrames">0</dd>
+
+          <dt>WebSocket</dt>
+          <dd><code id="wsPath">-</code></dd>
+        </dl>
+
+        <section class="controls">
+          <h2 class="controls-title">Undistort Controls</h2>
+          <p class="controls-note">These values apply to future best-stream keyframes. Preview stays unchanged.</p>
+          <form id="calibrationForm">
+            <label class="checkbox-row">
+              <input id="distortEnabled" type="checkbox" checked>
+              <span>Enable undistortion</span>
+            </label>
+
+            <div class="field-grid">
+              <label>
+                FX
+                <input id="fx" type="number" step="0.01" min="-2" max="2" value="0.12">
+              </label>
+              <label>
+                FY
+                <input id="fy" type="number" step="0.01" min="-2" max="2" value="0.15">
+              </label>
+              <label>
+                Scale
+                <input id="scale" type="number" step="0.01" min="0.1" max="4" value="0.95">
+              </label>
+            </div>
+
+            <button id="applyCalibration" type="submit">Apply Calibration</button>
+          </form>
+          <div id="calibrationStatus" class="status-warn">Waiting for first undistorted keyframe</div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const undistortedStatusEl = document.getElementById('undistortedStatus');
+    const calibrationStatusEl = document.getElementById('calibrationStatus');
+    const deviceEl = document.getElementById('device');
+    const sourceEl = document.getElementById('source');
+    const previewEl = document.getElementById('preview');
+    const undistortedMetaEl = document.getElementById('undistortedMeta');
+    const undistortedInfoEl = document.getElementById('undistortedInfo');
+    const codecEl = document.getElementById('codec');
+    const mimeEl = document.getElementById('mime');
+    const aiFramesEl = document.getElementById('aiFrames');
+    const wsPathEl = document.getElementById('wsPath');
+    const videoEl = document.getElementById('player');
+    const canvasEl = document.getElementById('canvas');
+    const canvasCtx = canvasEl.getContext('2d', { alpha: false });
+    const undistortedImageEl = document.getElementById('undistortedImage');
+    const undistortedEmptyEl = document.getElementById('undistortedEmpty');
+    const calibrationFormEl = document.getElementById('calibrationForm');
+    const distortEnabledEl = document.getElementById('distortEnabled');
+    const fxEl = document.getElementById('fx');
+    const fyEl = document.getElementById('fy');
+    const scaleEl = document.getElementById('scale');
+    const applyCalibrationEl = document.getElementById('applyCalibration');
+    const LIVE_TARGET_SECONDS = 0.25;
+    const LIVE_MAX_LATENCY_SECONDS = 1.25;
+    const LIVE_BUFFER_SECONDS = 1.5;
+    const LATE_FRAME_THRESHOLD = 2;
+    const MAX_PENDING_DECODE = 4;
+
+    let currentMeta = null;
+    let decoder = null;
+    let decoderCodec = null;
+    let decoderDescription = null;
+    let frameIndex = 0;
+    let pendingDecode = 0;
+    let waitingForKeyframe = false;
+    let lastReceivedFrameNo = 0;
+    let canvasStream = null;
+    let lastUndistortedFrameNo = 0;
+    let calibrationLoaded = false;
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls;
+    }
+
+    function setUndistortedStatus(text, cls) {
+      undistortedStatusEl.textContent = text;
+      undistortedStatusEl.className = cls;
+    }
+
+    function setCalibrationStatus(text, cls) {
+      calibrationStatusEl.textContent = text;
+      calibrationStatusEl.className = cls;
+    }
+
+    function syncCalibrationForm(calibration) {
+      if (!calibration) {
+        return;
+      }
+      const active = document.activeElement;
+      if (calibrationLoaded && calibrationFormEl.contains(active)) {
+        return;
+      }
+      distortEnabledEl.checked = calibration.distort !== false;
+      fxEl.value = String(calibration.fx ?? 0.12);
+      fyEl.value = String(calibration.fy ?? 0.15);
+      scaleEl.value = String(calibration.scale ?? 0.95);
+      calibrationLoaded = true;
+    }
+
+    function updateUndistortedFrame(meta) {
+      const frameNo = meta.undistortedFrameNo || 0;
+      const width = meta.undistortedWidth || 0;
+      const height = meta.undistortedHeight || 0;
+      undistortedMetaEl.textContent = frameNo ? `${width}x${height} • frame ${frameNo}` : '-';
+      undistortedInfoEl.textContent = frameNo ? `Best stream JPEG • frame ${frameNo}` : 'Best stream JPEG snapshot';
+
+      if (!frameNo) {
+        if (!undistortedImageEl.src) {
+          setUndistortedStatus('Waiting for first undistorted keyframe', 'status-warn');
+          setCalibrationStatus('Waiting for first undistorted keyframe', 'status-warn');
+        }
+        return;
+      }
+      if (frameNo === lastUndistortedFrameNo) {
+        return;
+      }
+      lastUndistortedFrameNo = frameNo;
+      setUndistortedStatus('Loading latest undistorted keyframe', 'status-warn');
+      undistortedImageEl.src = `${meta.undistortedPath || '/api/undistorted.jpg'}?frame=${frameNo}`;
+    }
+
+    function applyMeta(meta) {
+      currentMeta = meta;
+      deviceEl.textContent = meta.device || '-';
+      const sourceWidth = meta.source?.width ?? meta.source?.Width ?? 0;
+      const sourceHeight = meta.source?.height ?? meta.source?.Height ?? 0;
+      const sourceFPS = meta.source?.frameRate ?? meta.source?.FrameRate ?? 0;
+      sourceEl.textContent = meta.source ? `${sourceWidth}x${sourceHeight} @ ${Math.round(sourceFPS || 0)}fps` : '-';
+      previewEl.textContent = `${meta.previewWidth || 0}x${meta.previewHeight || 0}`;
+      codecEl.textContent = meta.codec || '-';
+      mimeEl.textContent = meta.mimeType || '-';
+      aiFramesEl.textContent = String(meta.aiFrames || 0);
+      wsPathEl.textContent = meta.wsPath || '/ws/preview';
+      syncCalibrationForm(meta.calibration);
+      updateUndistortedFrame(meta);
+    }
+
+    async function fetchMeta() {
+      const response = await fetch('/api/meta', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`meta request failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function waitForMeta() {
+      while (true) {
+        const meta = await fetchMeta();
+        applyMeta(meta);
+        if (meta.mimeType) {
+          return meta;
+        }
+        setStatus('Waiting for codec metadata from preview stream', 'status-warn');
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    async function pollMeta() {
+      while (true) {
+        try {
+          applyMeta(await fetchMeta());
+        } catch (err) {
+          console.error(err);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
+    function parseInit(buf) {
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length - 8; i += 1) {
+        if (bytes[i] === 0x61 && bytes[i + 1] === 0x76 && bytes[i + 2] === 0x63 && bytes[i + 3] === 0x43) {
+          const payloadStart = i + 4;
+          const boxSize = ((bytes[i - 4] << 24) | (bytes[i - 3] << 16) | (bytes[i - 2] << 8) | bytes[i - 1]) >>> 0;
+          const payloadLength = boxSize - 8;
+          const profile = bytes[payloadStart + 1].toString(16).padStart(2, '0');
+          const compat = bytes[payloadStart + 2].toString(16).padStart(2, '0');
+          const level = bytes[payloadStart + 3].toString(16).padStart(2, '0');
+          return {
+            codec: `avc1.${profile}${compat}${level}`,
+            description: buf.slice(payloadStart, payloadStart + payloadLength),
+          };
+        }
+      }
+      return { codec: 'avc1.640028', description: null };
+    }
+
+    function parseFrag(buf) {
+      const bytes = new Uint8Array(buf);
+      const frameNo = Number(new DataView(buf).getBigUint64(0));
+      const data = buf.slice(8);
+
+      for (let i = 0; i < bytes.length - 16; i += 1) {
+        if (bytes[i + 12] === 0x6d && bytes[i + 13] === 0x64 && bytes[i + 14] === 0x61 && bytes[i + 15] === 0x74) {
+          const size = ((bytes[i + 8] << 24) | (bytes[i + 9] << 16) | (bytes[i + 10] << 8) | bytes[i + 11]) >>> 0;
+          const payload = new Uint8Array(data.slice(i + 8, i + size));
+          let isKey = false;
+          let pos = 0;
+          while (pos + 4 < payload.length) {
+            const nalLength = ((payload[pos] << 24) | (payload[pos + 1] << 16) | (payload[pos + 2] << 8) | payload[pos + 3]) >>> 0;
+            if (nalLength === 0 || pos + 4 + nalLength > payload.length) {
+              break;
+            }
+            const nalType = payload[pos + 4] & 0x1f;
+            if (nalType === 5 || nalType === 19) {
+              isKey = true;
+              break;
+            }
+            pos += 4 + nalLength;
+          }
+          return { frameNo, payload, isKey };
+        }
+      }
+
+      return { frameNo, payload: new Uint8Array(data), isKey: false };
+    }
+
+    function resetDecoderForGap() {
+      waitingForKeyframe = true;
+      pendingDecode = 0;
+      if (decoder && decoder.state !== 'closed') {
+        try {
+          decoder.close();
+        } catch (_) {}
+      }
+      decoder = null;
+    }
+
+    async function attachCanvasStreamToVideo() {
+      if (!canvasStream) {
+        canvasStream = canvasEl.captureStream(30);
+      }
+      if (videoEl.srcObject !== canvasStream) {
+        videoEl.removeAttribute('src');
+        videoEl.srcObject = canvasStream;
+      }
+      try {
+        await videoEl.play();
+      } catch (_) {}
+    }
+
+    function makeDecoder(codec, description) {
+      if (typeof VideoDecoder === 'undefined' || typeof EncodedVideoChunk === 'undefined') {
+        throw new Error('WebCodecs is not available in this browser.');
+      }
+      if (decoder && decoder.state !== 'closed') {
+        try {
+          decoder.close();
+        } catch (_) {}
+      }
+      decoder = new VideoDecoder({
+        output: (frame) => {
+          pendingDecode = Math.max(0, pendingDecode - 1);
+          const width = frame.displayWidth;
+          const height = frame.displayHeight;
+          if (canvasEl.width !== width || canvasEl.height !== height) {
+            canvasEl.width = width;
+            canvasEl.height = height;
+          }
+          canvasCtx.drawImage(frame, 0, 0, width, height);
+          frame.close();
+        },
+        error: () => {
+          pendingDecode = Math.max(0, pendingDecode - 1);
+          resetDecoderForGap();
+        },
+      });
+      const config = {
+        codec,
+        optimizeForLatency: true,
+        hardwareAcceleration: 'prefer-hardware',
+      };
+      if (description) {
+        config.description = description;
+      }
+      decoder.configure(config);
+      waitingForKeyframe = false;
+    }
+
+    function canUseWebCodecs() {
+      return typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined';
+    }
+
+    function startWebCodecsPlayer(meta) {
+      videoEl.hidden = false;
+      canvasEl.hidden = true;
+      setStatus('Opening preview stream (WebCodecs)', 'status-warn');
+      attachCanvasStreamToVideo();
+
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${scheme}://${location.host}${meta.wsPath}`);
+      ws.binaryType = 'arraybuffer';
+
+      let seenInit = false;
+      ws.onopen = () => setStatus('Preview connected (WebCodecs)', 'status-ok');
+      ws.onerror = () => setStatus('Preview websocket error', 'status-err');
+      ws.onclose = () => setStatus('Preview websocket closed', 'status-warn');
+      ws.onmessage = (event) => {
+        if (!seenInit) {
+          seenInit = true;
+          const parsed = parseInit(event.data);
+          decoderCodec = parsed.codec;
+          decoderDescription = parsed.description;
+          try {
+            makeDecoder(decoderCodec, decoderDescription);
+          } catch (err) {
+            console.error(err);
+            setStatus(err.message || String(err), 'status-err');
+          }
+          return;
+        }
+
+        if (!decoderCodec) {
+          return;
+        }
+
+        const { frameNo, payload, isKey } = parseFrag(event.data);
+        if (lastReceivedFrameNo > 0 && frameNo > lastReceivedFrameNo + 1 && !isKey) {
+          lastReceivedFrameNo = frameNo;
+          resetDecoderForGap();
+          return;
+        }
+        lastReceivedFrameNo = frameNo;
+
+        if (!decoder || decoder.state !== 'configured') {
+          if (!isKey) {
+            waitingForKeyframe = true;
+            return;
+          }
+          try {
+            makeDecoder(decoderCodec, decoderDescription);
+          } catch (err) {
+            console.error(err);
+            setStatus(err.message || String(err), 'status-err');
+            return;
+          }
+        }
+
+        if (waitingForKeyframe && !isKey) {
+          return;
+        }
+
+        const decodeQueue = Math.max(decoder.decodeQueueSize || 0, pendingDecode);
+        if (decodeQueue >= LATE_FRAME_THRESHOLD && !isKey) {
+          resetDecoderForGap();
+          return;
+        }
+        if (decodeQueue >= MAX_PENDING_DECODE && !isKey) {
+          resetDecoderForGap();
+          return;
+        }
+
+        try {
+          pendingDecode += 1;
+          decoder.decode(new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: (++frameIndex) * 100000,
+            data: payload,
+          }));
+          if (isKey) {
+            waitingForKeyframe = false;
+          }
+        } catch (_) {
+          pendingDecode = Math.max(0, pendingDecode - 1);
+          resetDecoderForGap();
+        }
+      };
+    }
+
+    function trimBuffer(sourceBuffer) {
+      if (sourceBuffer.updating || !videoEl.buffered.length) {
+        return;
+      }
+      const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+      const keepFrom = Math.max(0, bufferedEnd - LIVE_BUFFER_SECONDS);
+      if (keepFrom > 0) {
+        sourceBuffer.remove(0, keepFrom);
+      }
+    }
+
+    function nudgeToLiveEdge(force = false) {
+      if (!videoEl.buffered.length) {
+        return;
+      }
+      const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+      const latency = bufferedEnd - videoEl.currentTime;
+      if (!Number.isFinite(latency)) {
+        return;
+      }
+      if (force || latency > LIVE_MAX_LATENCY_SECONDS) {
+        videoEl.currentTime = Math.max(0, bufferedEnd - LIVE_TARGET_SECONDS);
+        videoEl.playbackRate = 1;
+        return;
+      }
+      if (latency > 0.75) {
+        videoEl.playbackRate = 1.05;
+        return;
+      }
+      videoEl.playbackRate = 1;
+    }
+
+    async function startPlayer() {
+      const meta = await waitForMeta();
+      if (canUseWebCodecs()) {
+        startWebCodecsPlayer(meta);
+        return;
+      }
+
+      if (!('MediaSource' in window)) {
+        setStatus('Neither WebCodecs nor MediaSource is supported in this browser', 'status-err');
+        return;
+      }
+      if (!MediaSource.isTypeSupported(meta.mimeType)) {
+        setStatus(`Browser does not support ${meta.mimeType}`, 'status-err');
+        return;
+      }
+
+      videoEl.hidden = false;
+      if (videoEl.srcObject) {
+        videoEl.srcObject = null;
+      }
+      canvasEl.hidden = true;
+      const mediaSource = new MediaSource();
+      videoEl.src = URL.createObjectURL(mediaSource);
+      setStatus('Opening preview stream (MSE fallback)', 'status-warn');
+
+      mediaSource.addEventListener('sourceopen', () => {
+        const sourceBuffer = mediaSource.addSourceBuffer(meta.mimeType);
+        sourceBuffer.mode = 'segments';
+
+        const queue = [];
+        let appending = false;
+
+        const pump = () => {
+          if (appending || sourceBuffer.updating || queue.length === 0) {
+            return;
+          }
+          appending = true;
+          sourceBuffer.appendBuffer(queue.shift());
+        };
+
+        sourceBuffer.addEventListener('updateend', () => {
+          appending = false;
+          trimBuffer(sourceBuffer);
+          nudgeToLiveEdge();
+          pump();
+        });
+
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(`${scheme}://${location.host}${meta.wsPath}`);
+        ws.binaryType = 'arraybuffer';
+
+        let seenInit = false;
+        ws.onopen = () => setStatus('Preview connected (MSE fallback)', 'status-ok');
+        ws.onerror = () => setStatus('Preview websocket error', 'status-err');
+        ws.onclose = () => setStatus('Preview websocket closed', 'status-warn');
+        ws.onmessage = (event) => {
+          const chunk = new Uint8Array(event.data);
+          if (!seenInit) {
+            seenInit = true;
+            queue.push(chunk);
+            pump();
+            return;
+          }
+          if (chunk.byteLength <= 8) {
+            return;
+          }
+          queue.push(chunk.slice(8));
+          pump();
+        };
+
+        videoEl.addEventListener('playing', () => nudgeToLiveEdge(), { passive: true });
+        videoEl.addEventListener('timeupdate', () => nudgeToLiveEdge(), { passive: true });
+        videoEl.addEventListener('waiting', () => nudgeToLiveEdge(true), { passive: true });
+      }, { once: true });
+    }
+
+    function parseNumber(input, fallback) {
+      const value = Number.parseFloat(input.value);
+      return Number.isFinite(value) ? value : fallback;
+    }
+
+    calibrationFormEl.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      applyCalibrationEl.disabled = true;
+      setCalibrationStatus('Applying calibration. Waiting for next keyframe.', 'status-warn');
+      try {
+        const response = await fetch('/api/calibration', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            distort: distortEnabledEl.checked,
+            fx: parseNumber(fxEl, 0.12),
+            fy: parseNumber(fyEl, 0.15),
+            scale: parseNumber(scaleEl, 0.95),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await response.text() || `calibration update failed: ${response.status}`);
+        }
+        const meta = await response.json();
+        applyMeta(meta);
+        setCalibrationStatus('Calibration updated. Waiting for next keyframe.', 'status-ok');
+        setUndistortedStatus('Calibration updated. Waiting for next keyframe.', 'status-warn');
+      } catch (err) {
+        console.error(err);
+        setCalibrationStatus(err.message || String(err), 'status-err');
+      } finally {
+        applyCalibrationEl.disabled = false;
+      }
+    });
+
+    undistortedImageEl.addEventListener('load', () => {
+      undistortedImageEl.hidden = false;
+      undistortedEmptyEl.hidden = true;
+      if (lastUndistortedFrameNo > 0) {
+        setUndistortedStatus(`Undistorted keyframe ${lastUndistortedFrameNo} ready`, 'status-ok');
+      } else {
+        setUndistortedStatus('Undistorted keyframe ready', 'status-ok');
+      }
+    });
+
+    undistortedImageEl.addEventListener('error', () => {
+      undistortedImageEl.hidden = true;
+      undistortedEmptyEl.hidden = false;
+      setUndistortedStatus('Undistorted frame unavailable', 'status-err');
+    });
+
+    startPlayer().catch((err) => {
+      console.error(err);
+      setStatus(err.message || String(err), 'status-err');
+    });
+    pollMeta();
+  </script>
+</body>
+</html>

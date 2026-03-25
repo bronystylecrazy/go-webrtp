@@ -18,12 +18,13 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/bronystylecrazy/go-webrtp"
+	"github.com/bronystylecrazy/go-webrtp/streamcore"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/bronystylecrazy/go-webrtp"
-	"github.com/bronystylecrazy/go-webrtp/streamcore"
 	"github.com/dustin/go-humanize"
+	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/mattn/go-isatty"
@@ -500,6 +501,42 @@ func resolveHashedDeviceID(id string) (string, error) {
 	return "", fiber.ErrNotFound
 }
 
+func preferredStreamVariant(quality, mapped string) string {
+	if quality = strings.TrimSpace(quality); quality != "" {
+		return quality
+	}
+	return strings.TrimSpace(mapped)
+}
+
+func streamVariantQuery(c fiber.Ctx) string {
+	return preferredStreamVariant(c.Query("quality"), c.Query("map"))
+}
+
+func resolveStreamRouteName(manager *streamcore.Manager, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if _, ok := manager.Get(name); ok {
+		return name
+	}
+	if stream, ok := manager.StreamByNameAny(name); ok && stream != nil {
+		if groupName := strings.TrimSpace(stream.GroupName); groupName != "" {
+			return groupName
+		}
+		return stream.Name
+	}
+	for _, item := range manager.ListResponses() {
+		if item == nil || item.SourceType != "usb" || item.Device == "" {
+			continue
+		}
+		if item.Device == name || hashDeviceID(item.Device) == name {
+			return item.Name
+		}
+	}
+	return name
+}
+
 func apiDeviceCapabilities(deviceID string) (*DeviceCapabilitiesResponse, error) {
 	rawID, err := resolveHashedDeviceID(deviceID)
 	if err != nil {
@@ -608,12 +645,27 @@ func main() {
 		return stream.FiberHandler()(c)
 	})
 	app.All("/stream/:name", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQuality(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQuality(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if !ok {
 			return fiber.ErrNotFound
 		}
 		stream.EnsureStarted()
 		return stream.FiberHandler()(c)
+	})
+	app.All("/streams/:name", func(c fiber.Ctx) error {
+		name := resolveStreamRouteName(manager, c.Params("name"))
+		if websocket.IsWebSocketUpgrade(c) {
+			stream, ok := manager.StreamByNameQuality(name, streamVariantQuery(c))
+			if !ok {
+				return fiber.ErrNotFound
+			}
+			stream.EnsureStarted()
+			return stream.FiberHandler()(c)
+		}
+		if _, ok := manager.StreamByName(name); !ok {
+			return fiber.ErrNotFound
+		}
+		return c.Type("html").Send(streamHtml)
 	})
 
 	app.Get("/info", func(c fiber.Ctx) error {
@@ -684,14 +736,14 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(item)
 	})
 	app.Get("/api/streams/:name", func(c fiber.Ctx) error {
-		item, ok := manager.Get(c.Params("name"))
+		item, ok := manager.Get(resolveStreamRouteName(manager, c.Params("name")))
 		if !ok {
 			return fiber.ErrNotFound
 		}
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/enable", func(c fiber.Ctx) error {
-		item, err := manager.SetEnabled(c.Params("name"), true)
+		item, err := manager.SetEnabled(resolveStreamRouteName(manager, c.Params("name")), true)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -701,7 +753,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/disable", func(c fiber.Ctx) error {
-		item, err := manager.SetEnabled(c.Params("name"), false)
+		item, err := manager.SetEnabled(resolveStreamRouteName(manager, c.Params("name")), false)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -711,7 +763,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/start", func(c fiber.Ctx) error {
-		item, err := manager.Start(c.Params("name"), c.Query("quality"))
+		item, err := manager.Start(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -721,7 +773,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/stop", func(c fiber.Ctx) error {
-		item, err := manager.Stop(c.Params("name"), c.Query("quality"))
+		item, err := manager.Stop(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -735,7 +787,7 @@ func main() {
 		if err := c.Bind().Body(req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		item, err := manager.UpdateMode(c.Params("name"), req)
+		item, err := manager.UpdateMode(resolveStreamRouteName(manager, c.Params("name")), req)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -745,7 +797,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Get("/api/streams/:name/capabilities", func(c fiber.Ctx) error {
-		item, ok, err := manager.Capabilities(c.Params("name"))
+		item, ok, err := manager.Capabilities(resolveStreamRouteName(manager, c.Params("name")))
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
@@ -755,7 +807,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Post("/api/streams/:name/calibration", func(c fiber.Ctx) error {
-		targets := manager.CalibrationTargets(c.Params("name"), c.Query("quality"))
+		targets := manager.CalibrationTargets(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if len(targets) == 0 {
 			return fiber.ErrNotFound
 		}
@@ -784,7 +836,7 @@ func main() {
 		if err := c.Bind().Body(req); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
-		item, err := manager.Update(c.Params("name"), req)
+		item, err := manager.Update(resolveStreamRouteName(manager, c.Params("name")), req)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
@@ -794,7 +846,7 @@ func main() {
 		return c.JSON(item)
 	})
 	app.Delete("/api/streams/:name", func(c fiber.Ctx) error {
-		if err := manager.Delete(c.Params("name")); err != nil {
+		if err := manager.Delete(resolveStreamRouteName(manager, c.Params("name"))); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return fiber.ErrNotFound
 			}
@@ -803,7 +855,7 @@ func main() {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 	app.Post("/api/streams/:name/record/start", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -824,7 +876,7 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(recordingResponse(stream))
 	})
 	app.Post("/api/streams/:name/record/stop", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -835,7 +887,7 @@ func main() {
 		return c.JSON(recordingResponse(stream))
 	})
 	app.Get("/api/streams/:name/record/status", func(c fiber.Ctx) error {
-		stream, ok := manager.StreamByNameQualityAny(c.Params("name"), c.Query("quality"))
+		stream, ok := manager.StreamByNameQualityAny(resolveStreamRouteName(manager, c.Params("name")), streamVariantQuery(c))
 		if !ok {
 			return fiber.ErrNotFound
 		}
@@ -845,14 +897,8 @@ func main() {
 	app.Get("/", func(c fiber.Ctx) error {
 		return c.Type("html").Send(indexHtml)
 	})
-	app.Get("/streams/:name", func(c fiber.Ctx) error {
-		if _, ok := manager.StreamByName(c.Params("name")); !ok {
-			return fiber.ErrNotFound
-		}
-		return c.Type("html").Send(streamHtml)
-	})
 	app.Get("/deskview/:name", func(c fiber.Ctx) error {
-		if _, ok := manager.StreamByName(c.Params("name")); !ok {
+		if _, ok := manager.StreamByName(resolveStreamRouteName(manager, c.Params("name"))); !ok {
 			return fiber.ErrNotFound
 		}
 		return c.Type("html").Send(streamHtml)

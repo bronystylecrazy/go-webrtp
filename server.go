@@ -49,5 +49,8 @@ func (r *Instance) Stop() error {
 		r.keyframes.Close()
 		r.keyframes = nil
 	}
+	r.publishMu.Lock()
+	r.publisher = nil
+	r.publishMu.Unlock()
 	return nil
 }

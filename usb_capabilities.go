@@ -1,9 +1,10 @@
 package webrtp
 
 type UsbCapabilityMode struct {
-	Width  int       `json:"width"`
-	Height int       `json:"height"`
-	Fps    []float64 `json:"fps,omitempty"`
+	Width        int       `json:"width"`
+	Height       int       `json:"height"`
+	Fps          []float64 `json:"fps,omitempty"`
+	PixelFormats []string  `json:"pixelFormats,omitempty"`
 }
 
 type UsbCapabilityRendition struct {

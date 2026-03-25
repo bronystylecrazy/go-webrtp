@@ -4,6 +4,7 @@ package webrtp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -37,27 +38,28 @@ type Keyframer interface {
 }
 
 type Config struct {
-	SourceType        string
-	StreamName        string
-	Rtsp              string
-	Device            string
-	Path              string
-	Codec             string
-	H264Profile       string
-	Width             int
-	Height            int
-	FrameRate         float64
-	BitrateKbps       int
-	KeyframeSink      string
-	KeyframeOutput    string
-	KeyframeFormat    string
-	KeyframeMqttURL   string
-	KeyframeMqttTopic string
-	Keyframer         Keyframer
-	Logger            Logger
-	WriteTimeout      time.Duration
-	ReadBufferSize    int
-	WriteBufferSize   int
+	SourceType            string
+	StreamName            string
+	Rtsp                  string
+	Device                string
+	Path                  string
+	Codec                 string
+	H264Profile           string
+	Width                 int
+	Height                int
+	FrameRate             float64
+	BitrateKbps           int
+	KeyframeSink          string
+	KeyframeOutput        string
+	KeyframeFormat        string
+	KeyframeMqttURL       string
+	KeyframeMqttTopic     string
+	Keyframer             Keyframer
+	Logger                Logger
+	WriteTimeout          time.Duration
+	ReadBufferSize        int
+	WriteBufferSize       int
+	H264AccessUnitHandler func(H264AccessUnit)
 }
 
 type Instance struct {
@@ -71,6 +73,8 @@ type Instance struct {
 	recorderMu sync.Mutex
 	recorder   *Recorder
 	keyframes  *keyframeSink
+	publishMu  sync.Mutex
+	publisher  *videoHandler
 }
 
 type stdLogger struct{}
@@ -101,27 +105,28 @@ func Init(cfg *Config) *Instance {
 	}
 	inst := &Instance{
 		cfg: &Config{
-			SourceType:        sourceType,
-			StreamName:        strings.TrimSpace(cfg.StreamName),
-			Rtsp:              cfg.Rtsp,
-			Device:            cfg.Device,
-			Path:              cfg.Path,
-			Codec:             strings.ToLower(strings.TrimSpace(cfg.Codec)),
-			H264Profile:       strings.ToLower(strings.TrimSpace(cfg.H264Profile)),
-			Width:             cfg.Width,
-			Height:            cfg.Height,
-			FrameRate:         cfg.FrameRate,
-			BitrateKbps:       cfg.BitrateKbps,
-			KeyframeSink:      strings.ToLower(strings.TrimSpace(cfg.KeyframeSink)),
-			KeyframeOutput:    strings.TrimSpace(cfg.KeyframeOutput),
-			KeyframeFormat:    strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat)),
-			KeyframeMqttURL:   strings.TrimSpace(cfg.KeyframeMqttURL),
-			KeyframeMqttTopic: strings.TrimSpace(cfg.KeyframeMqttTopic),
-			Keyframer:         cfg.Keyframer,
-			Logger:            logger,
-			WriteTimeout:      writeTimeout,
-			ReadBufferSize:    readBuf,
-			WriteBufferSize:   writeBuf,
+			SourceType:            sourceType,
+			StreamName:            strings.TrimSpace(cfg.StreamName),
+			Rtsp:                  cfg.Rtsp,
+			Device:                cfg.Device,
+			Path:                  cfg.Path,
+			Codec:                 strings.ToLower(strings.TrimSpace(cfg.Codec)),
+			H264Profile:           strings.ToLower(strings.TrimSpace(cfg.H264Profile)),
+			Width:                 cfg.Width,
+			Height:                cfg.Height,
+			FrameRate:             cfg.FrameRate,
+			BitrateKbps:           cfg.BitrateKbps,
+			KeyframeSink:          strings.ToLower(strings.TrimSpace(cfg.KeyframeSink)),
+			KeyframeOutput:        strings.TrimSpace(cfg.KeyframeOutput),
+			KeyframeFormat:        strings.ToLower(strings.TrimSpace(cfg.KeyframeFormat)),
+			KeyframeMqttURL:       strings.TrimSpace(cfg.KeyframeMqttURL),
+			KeyframeMqttTopic:     strings.TrimSpace(cfg.KeyframeMqttTopic),
+			Keyframer:             cfg.Keyframer,
+			Logger:                logger,
+			WriteTimeout:          writeTimeout,
+			ReadBufferSize:        readBuf,
+			WriteBufferSize:       writeBuf,
+			H264AccessUnitHandler: cfg.H264AccessUnitHandler,
 		},
 		hub:      NewHub(),
 		logger:   logger,
@@ -132,7 +137,10 @@ func Init(cfg *Config) *Instance {
 }
 
 func (r *Instance) ensureKeyframeSink() {
-	if r == nil || r.keyframes != nil || strings.TrimSpace(r.cfg.KeyframeSink) == "" {
+	if r == nil || r.keyframes != nil {
+		return
+	}
+	if strings.TrimSpace(r.cfg.KeyframeSink) == "" && r.cfg.Keyframer == nil {
 		return
 	}
 	r.keyframes = newKeyframeSink(r.cfg, r.logger)
@@ -234,4 +242,53 @@ func (r *Instance) PublishDeskViewMetadata(topic string, payload []byte) error {
 		return nil
 	}
 	return r.keyframes.PublishDeskViewMetadata(topic, payload)
+}
+
+func (r *Instance) PublishH264AccessUnit(au [][]byte, pts90k uint32) {
+	if r == nil {
+		return
+	}
+	r.ensureKeyframeSink()
+	r.publishMu.Lock()
+	handler := r.publisher
+	if handler == nil {
+		handler = &videoHandler{hub: r.hub, logger: r.logger, instance: r}
+		r.publisher = handler
+	}
+	r.publishMu.Unlock()
+	handler.processH264(au, pts90k, nil, nil)
+}
+
+// ForceNextKeyFrame requests that the current source emit a keyframe when supported.
+func (r *Instance) ForceNextKeyFrame() error {
+	if r == nil || r.conn == nil {
+		return fmt.Errorf("source is not active")
+	}
+	requester, ok := r.conn.(interface{ ForceNextKeyFrame() error })
+	if !ok {
+		return fmt.Errorf("source cannot force a keyframe")
+	}
+	return requester.ForceNextKeyFrame()
+}
+
+func EachH264AccessUnit(rd io.Reader, fn func(au [][]byte) error) error {
+	if rd == nil || fn == nil {
+		return nil
+	}
+	reader := newH264AccessUnitReader(rd)
+	for {
+		au, err := reader.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if len(au) == 0 {
+			continue
+		}
+		if err := fn(au); err != nil {
+			return err
+		}
+	}
 }

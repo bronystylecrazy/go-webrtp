@@ -2678,7 +2678,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
             const deskViewSyncId = hashParams.get(deskViewSyncParam) || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
             let activeName = decodeURIComponent(location.pathname.split('/').pop() || '');
-            let activeQuality = initialParams.get('quality') || '';
+            let activeQuality = initialParams.get('map') || initialParams.get('quality') || '';
             let pendingQuality = '';
             let pendingName = '';
             if (isDeskViewOnly) {
@@ -3148,8 +3148,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 syncEffectState();
             };
             const streamWsUrl = (name, quality) => {
-                const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
-                return `${protocol}://${location.host}/stream/${encodeURIComponent(name)}${query}`;
+                const query = quality ? `?map=${encodeURIComponent(quality)}` : '';
+                return `${protocol}://${location.host}/streams/${encodeURIComponent(name)}${query}`;
             };
             const buildDeskViewSyncPayload = () => ({
                 name: pendingName || activeName,
@@ -4348,7 +4348,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 const url = new URL(location.href);
                 url.pathname = isDeskViewOnly ? `/deskview/${encodeURIComponent(name)}` : `/streams/${encodeURIComponent(name)}`;
                 if (quality) {
-                    url.search = `?quality=${encodeURIComponent(quality)}`;
+                    url.search = `?map=${encodeURIComponent(quality)}`;
                 } else {
                     url.search = '';
                 }
@@ -4359,7 +4359,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 const url = new URL(location.href);
                 url.pathname = `/deskview/${encodeURIComponent(name)}`;
                 if (quality) {
-                    url.search = `?quality=${encodeURIComponent(quality)}`;
+                    url.search = `?map=${encodeURIComponent(quality)}`;
                 } else {
                     url.search = '';
                 }

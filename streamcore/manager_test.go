@@ -197,3 +197,84 @@ func TestManagerStreamByNameQualityFallsBackToDefaultRendition(t *testing.T) {
 		t.Fatalf("expected default rendition 'mid', got %q", stream.RenditionName)
 	}
 }
+
+func TestUSBFFmpegRenditionsExposeMapPaths(t *testing.T) {
+	name := "cam"
+	sourceType := "usb"
+	device := "16MP USB Camera"
+	frameRate := 10.0
+	ffmpegInputArgs := []string{"-framerate", "10", "-video_size", "4000x3000", "-vcodec", "mjpeg"}
+	ffmpegEncoderArgs := []string{"-rc", "cbr"}
+	fullWidth := 4000
+	fullHeight := 3000
+	fullBitrate := 20000
+	sdWidth := 1600
+	sdHeight := 1200
+	sdBitrate := 4000
+	cfg := &Config{
+		Upstreams: []*Upstream{{
+			Name:              &name,
+			SourceType:        &sourceType,
+			Device:            device,
+			Codec:             "h264",
+			FFmpegInputFormat: "dshow",
+			FFmpegInputArgs:   ffmpegInputArgs,
+			FFmpegFilter:      "format=yuv420p",
+			FFmpegEncoder:     "h264_amf",
+			FFmpegEncoderArgs: ffmpegEncoderArgs,
+			FrameRate:         &frameRate,
+			OnDemand:          true,
+			Renditions: []*Rendition{
+				{Name: "cam2", Width: &sdWidth, Height: &sdHeight, BitrateKbps: &sdBitrate, FFmpegFilter: "eq=contrast=1.1"},
+				{Name: "cam1", Width: &fullWidth, Height: &fullHeight, BitrateKbps: &fullBitrate},
+			},
+		}},
+	}
+	manager, err := NewManager(WithConfigFile(""), WithConfig(cfg))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer manager.Close()
+
+	resp, ok := manager.Get(name)
+	if !ok {
+		t.Fatal("expected stream response")
+	}
+	if resp.WsPath != "/streams/cam" {
+		t.Fatalf("expected group ws path, got %q", resp.WsPath)
+	}
+	if len(resp.Renditions) != 2 {
+		t.Fatalf("expected 2 renditions, got %d", len(resp.Renditions))
+	}
+	if resp.Renditions[0].WsPath != "/streams/cam?map=cam2" {
+		t.Fatalf("unexpected low rendition ws path: %q", resp.Renditions[0].WsPath)
+	}
+	if resp.Renditions[0].FFmpegFilter != "eq=contrast=1.1" {
+		t.Fatalf("unexpected low rendition filter: %q", resp.Renditions[0].FFmpegFilter)
+	}
+	if resp.Renditions[1].WsPath != "/streams/cam?map=cam1" {
+		t.Fatalf("unexpected high rendition ws path: %q", resp.Renditions[1].WsPath)
+	}
+}
+
+func TestUSBFFmpegRenditionFilterValidation(t *testing.T) {
+	name := "cam"
+	sourceType := "usb"
+	device := "camera0"
+	cfg := &Config{
+		Upstreams: []*Upstream{{
+			Name:       &name,
+			SourceType: &sourceType,
+			Device:     device,
+			Codec:      "h264",
+			OnDemand:   true,
+			Renditions: []*Rendition{
+				{Name: "cam1", FFmpegFilter: "crop=100:100"},
+			},
+		}},
+	}
+	_, err := NewManager(WithConfigFile(""), WithConfig(cfg))
+	if err == nil || err.Error() != "rendition cam1 ffmpegFilter requires usb ffmpeg mode" {
+		t.Fatalf("expected usb ffmpeg mode validation error, got %v", err)
+	}
+}

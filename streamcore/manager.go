@@ -3,6 +3,7 @@ package streamcore
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"runtime"
 	"sort"
@@ -31,6 +32,11 @@ type Upstream struct {
 	Device            string            `yaml:"device" json:"device,omitempty"`
 	Path              string            `yaml:"path" json:"path,omitempty"`
 	Codec             string            `yaml:"codec" json:"codec,omitempty"`
+	FFmpegInputFormat string            `yaml:"ffmpegInputFormat" json:"ffmpegInputFormat,omitempty"`
+	FFmpegInputArgs   []string          `yaml:"ffmpegInputArgs" json:"ffmpegInputArgs,omitempty"`
+	FFmpegFilter      string            `yaml:"ffmpegFilter" json:"ffmpegFilter,omitempty"`
+	FFmpegEncoder     string            `yaml:"ffmpegEncoder" json:"ffmpegEncoder,omitempty"`
+	FFmpegEncoderArgs []string          `yaml:"ffmpegEncoderArgs" json:"ffmpegEncoderArgs,omitempty"`
 	H264Profile       *string           `yaml:"h264Profile" json:"h264Profile,omitempty"`
 	Width             *int              `yaml:"width" json:"width,omitempty"`
 	Height            *int              `yaml:"height" json:"height,omitempty"`
@@ -50,12 +56,13 @@ type Upstream struct {
 }
 
 type Rendition struct {
-	Name        string   `yaml:"name" json:"name"`
-	Width       *int     `yaml:"width,omitempty" json:"width,omitempty"`
-	Height      *int     `yaml:"height,omitempty" json:"height,omitempty"`
-	FrameRate   *float64 `yaml:"frameRate,omitempty" json:"frameRate,omitempty"`
-	BitrateKbps *int     `yaml:"bitrateKbps,omitempty" json:"bitrateKbps,omitempty"`
-	OnDemand    *bool    `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
+	Name         string   `yaml:"name" json:"name"`
+	Width        *int     `yaml:"width,omitempty" json:"width,omitempty"`
+	Height       *int     `yaml:"height,omitempty" json:"height,omitempty"`
+	FrameRate    *float64 `yaml:"frameRate,omitempty" json:"frameRate,omitempty"`
+	BitrateKbps  *int     `yaml:"bitrateKbps,omitempty" json:"bitrateKbps,omitempty"`
+	FFmpegFilter string   `yaml:"ffmpegFilter,omitempty" json:"ffmpegFilter,omitempty"`
+	OnDemand     *bool    `yaml:"onDemand,omitempty" json:"onDemand,omitempty"`
 }
 
 type Stream struct {
@@ -71,6 +78,7 @@ type Stream struct {
 	started       atomic.Bool
 	stopTimerMu   sync.Mutex
 	stopTimer     *time.Timer
+	shared        *sharedSourceController
 }
 
 type Group struct {
@@ -87,6 +95,11 @@ type StreamRequest struct {
 	Device            string            `json:"device"`
 	Path              string            `json:"path"`
 	Codec             string            `json:"codec"`
+	FFmpegInputFormat string            `json:"ffmpegInputFormat"`
+	FFmpegInputArgs   []string          `json:"ffmpegInputArgs"`
+	FFmpegFilter      string            `json:"ffmpegFilter"`
+	FFmpegEncoder     string            `json:"ffmpegEncoder"`
+	FFmpegEncoderArgs []string          `json:"ffmpegEncoderArgs"`
 	Width             *int              `json:"width"`
 	Height            *int              `json:"height"`
 	FrameRate         *float64          `json:"frameRate"`
@@ -111,14 +124,15 @@ type ModeRequest struct {
 }
 
 type RenditionResponse struct {
-	Name        string               `json:"name"`
-	Width       *int                 `json:"width,omitempty"`
-	Height      *int                 `json:"height,omitempty"`
-	FrameRate   *float64             `json:"frameRate,omitempty"`
-	BitrateKbps *int                 `json:"bitrateKbps,omitempty"`
-	OnDemand    bool                 `json:"onDemand"`
-	WsPath      string               `json:"wsPath"`
-	Stats       *gwebrtp.StreamStats `json:"stats,omitempty"`
+	Name         string               `json:"name"`
+	Width        *int                 `json:"width,omitempty"`
+	Height       *int                 `json:"height,omitempty"`
+	FrameRate    *float64             `json:"frameRate,omitempty"`
+	BitrateKbps  *int                 `json:"bitrateKbps,omitempty"`
+	FFmpegFilter string               `json:"ffmpegFilter,omitempty"`
+	OnDemand     bool                 `json:"onDemand"`
+	WsPath       string               `json:"wsPath"`
+	Stats        *gwebrtp.StreamStats `json:"stats,omitempty"`
 }
 
 type StreamResponse struct {
@@ -129,6 +143,11 @@ type StreamResponse struct {
 	Device            string               `json:"device,omitempty"`
 	Path              string               `json:"path,omitempty"`
 	Codec             string               `json:"codec,omitempty"`
+	FFmpegInputFormat string               `json:"ffmpegInputFormat,omitempty"`
+	FFmpegInputArgs   []string             `json:"ffmpegInputArgs,omitempty"`
+	FFmpegFilter      string               `json:"ffmpegFilter,omitempty"`
+	FFmpegEncoder     string               `json:"ffmpegEncoder,omitempty"`
+	FFmpegEncoderArgs []string             `json:"ffmpegEncoderArgs,omitempty"`
 	Width             *int                 `json:"width,omitempty"`
 	Height            *int                 `json:"height,omitempty"`
 	FrameRate         *float64             `json:"frameRate,omitempty"`
@@ -696,6 +715,11 @@ func (m *Manager) UpdateMode(name string, req *ModeRequest) (*StreamResponse, er
 		Device:            oldUpstream.Device,
 		Path:              oldUpstream.Path,
 		Codec:             oldUpstream.Codec,
+		FFmpegInputFormat: oldUpstream.FFmpegInputFormat,
+		FFmpegInputArgs:   oldUpstream.FFmpegInputArgs,
+		FFmpegFilter:      oldUpstream.FFmpegFilter,
+		FFmpegEncoder:     oldUpstream.FFmpegEncoder,
+		FFmpegEncoderArgs: oldUpstream.FFmpegEncoderArgs,
 		H264Profile:       oldUpstream.H264Profile,
 		Width:             &req.Width,
 		Height:            &req.Height,
@@ -751,6 +775,9 @@ func (m *Manager) UpdateMode(name string, req *ModeRequest) (*StreamResponse, er
 func (m *Manager) groupCreate(index int, upstream *Upstream) (*Group, error) {
 	if err := ValidateUpstream(upstream); err != nil {
 		return nil, err
+	}
+	if UpstreamUsesUSBFFmpeg(upstream) {
+		return m.groupCreateUSBFFmpeg(index, upstream)
 	}
 	groupName := UpstreamName(index, upstream)
 	group := &Group{
@@ -939,6 +966,11 @@ func (m *Manager) streamResponse(index int, group *Group) *StreamResponse {
 		Device:            group.Upstream.Device,
 		Path:              group.Upstream.Path,
 		Codec:             group.Upstream.Codec,
+		FFmpegInputFormat: group.Upstream.FFmpegInputFormat,
+		FFmpegInputArgs:   append([]string(nil), group.Upstream.FFmpegInputArgs...),
+		FFmpegFilter:      group.Upstream.FFmpegFilter,
+		FFmpegEncoder:     group.Upstream.FFmpegEncoder,
+		FFmpegEncoderArgs: append([]string(nil), group.Upstream.FFmpegEncoderArgs...),
 		Width:             group.Upstream.Width,
 		Height:            group.Upstream.Height,
 		FrameRate:         group.Upstream.FrameRate,
@@ -959,7 +991,7 @@ func (m *Manager) streamResponse(index int, group *Group) *StreamResponse {
 	if group.Default != nil {
 		resp.URL = group.Default.URL
 		if UpstreamServeStream(group.Upstream) {
-			resp.WsPath = fmt.Sprintf("/stream/%s", group.Name)
+			resp.WsPath = groupWsPath(group.Name)
 		}
 		resp.ActiveRendition = group.Default.RenditionName
 	}
@@ -982,14 +1014,15 @@ func (m *Manager) streamResponse(index int, group *Group) *StreamResponse {
 			stats := stream.Hub.GetStats(stream.Name)
 			stats.Name = stream.Name
 			resp.Renditions = append(resp.Renditions, &RenditionResponse{
-				Name:        stream.RenditionName,
-				Width:       width,
-				Height:      height,
-				FrameRate:   frameRate,
-				BitrateKbps: bitrate,
-				OnDemand:    stream.OnDemand,
-				WsPath:      streamWsPath(stream, group.Upstream),
-				Stats:       &stats,
+				Name:         stream.RenditionName,
+				Width:        width,
+				Height:       height,
+				FrameRate:    frameRate,
+				BitrateKbps:  bitrate,
+				FFmpegFilter: valueOrEmptyRenditionFilter(group.Upstream.Renditions, stream.RenditionName),
+				OnDemand:     stream.OnDemand,
+				WsPath:       streamWsPath(stream, group.Upstream),
+				Stats:        &stats,
 			})
 		}
 	}
@@ -1013,6 +1046,10 @@ func (s *Stream) HandleWebsocket(conn *websocket.Conn) {
 }
 
 func (s *Stream) EnsureStarted() {
+	if s.shared != nil {
+		s.shared.EnsureStarted()
+		return
+	}
 	if !s.OnDemand || s.started.Load() {
 		return
 	}
@@ -1037,10 +1074,16 @@ func (s *Stream) EnsureStarted() {
 }
 
 func (s *Stream) HasActiveRecording() bool {
+	if s.shared != nil {
+		return s.shared.HasActiveRecording()
+	}
 	return s.Inst.RecordingStatus().Active
 }
 
 func (s *Stream) StopNow() error {
+	if s.shared != nil {
+		return s.shared.StopNow()
+	}
 	s.stopTimerMu.Lock()
 	if s.stopTimer != nil {
 		s.stopTimer.Stop()
@@ -1052,6 +1095,10 @@ func (s *Stream) StopNow() error {
 }
 
 func (s *Stream) MaybeScheduleStop(idle time.Duration) {
+	if s.shared != nil {
+		s.shared.MaybeScheduleStop(idle)
+		return
+	}
 	if !s.OnDemand || s.HasActiveRecording() || s.ActiveClientCount() > 0 {
 		return
 	}
@@ -1115,6 +1162,19 @@ func ValidateUpstream(upstream *Upstream) error {
 	default:
 		return fmt.Errorf("unsupported sourceType: %s", UpstreamSourceType(upstream))
 	}
+	if UpstreamUsesUSBFFmpeg(upstream) {
+		if strings.TrimSpace(upstream.FFmpegInputFormat) == "" {
+			return fmt.Errorf("usb ffmpeg upstream missing required ffmpegInputFormat")
+		}
+		if upstream.Codec != "" && !strings.EqualFold(upstream.Codec, "h264") {
+			return fmt.Errorf("usb ffmpeg upstream codec must be h264")
+		}
+		for _, rendition := range upstream.Renditions {
+			if rendition != nil && rendition.OnDemand != nil {
+				return fmt.Errorf("usb ffmpeg renditions do not support per-rendition onDemand overrides")
+			}
+		}
+	}
 	if upstream.H264Profile != nil && *upstream.H264Profile != "" {
 		profile := strings.ToLower(strings.TrimSpace(*upstream.H264Profile))
 		if profile != "baseline" && profile != "main" && profile != "high" {
@@ -1146,7 +1206,7 @@ func ValidateUpstream(upstream *Upstream) error {
 		if UpstreamSourceType(upstream) != "usb" {
 			return fmt.Errorf("renditions are only supported for usb streams")
 		}
-		if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		if !UpstreamUsesUSBFFmpeg(upstream) && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 			return fmt.Errorf("usb renditions are only supported on macos and windows")
 		}
 		for _, rendition := range upstream.Renditions {
@@ -1168,8 +1228,11 @@ func ValidateUpstream(upstream *Upstream) error {
 			if rendition.BitrateKbps != nil && *rendition.BitrateKbps <= 0 {
 				return fmt.Errorf("rendition %s has invalid bitrateKbps", rendition.Name)
 			}
-			if rendition.Width == nil && rendition.Height == nil && rendition.FrameRate == nil && rendition.BitrateKbps == nil {
-				return fmt.Errorf("rendition %s must override at least one of width, height, frameRate, or bitrateKbps", rendition.Name)
+			if strings.TrimSpace(rendition.FFmpegFilter) != "" && !UpstreamUsesUSBFFmpeg(upstream) {
+				return fmt.Errorf("rendition %s ffmpegFilter requires usb ffmpeg mode", rendition.Name)
+			}
+			if rendition.Width == nil && rendition.Height == nil && rendition.FrameRate == nil && rendition.BitrateKbps == nil && strings.TrimSpace(rendition.FFmpegFilter) == "" {
+				return fmt.Errorf("rendition %s must override at least one of width, height, frameRate, bitrateKbps, or ffmpegFilter", rendition.Name)
 			}
 		}
 	}
@@ -1184,6 +1247,11 @@ func RequestUpstream(req *StreamRequest) (*Upstream, error) {
 		Device:            req.Device,
 		Path:              req.Path,
 		Codec:             req.Codec,
+		FFmpegInputFormat: req.FFmpegInputFormat,
+		FFmpegInputArgs:   req.FFmpegInputArgs,
+		FFmpegFilter:      req.FFmpegFilter,
+		FFmpegEncoder:     req.FFmpegEncoder,
+		FFmpegEncoderArgs: req.FFmpegEncoderArgs,
 		Width:             req.Width,
 		Height:            req.Height,
 		FrameRate:         req.FrameRate,
@@ -1210,6 +1278,17 @@ func RequestUpstream(req *StreamRequest) (*Upstream, error) {
 		return nil, err
 	}
 	return upstream, nil
+}
+
+func UpstreamUsesUSBFFmpeg(upstream *Upstream) bool {
+	if upstream == nil || UpstreamSourceType(upstream) != "usb" {
+		return false
+	}
+	return strings.TrimSpace(upstream.FFmpegInputFormat) != "" ||
+		len(upstream.FFmpegInputArgs) > 0 ||
+		strings.TrimSpace(upstream.FFmpegFilter) != "" ||
+		strings.TrimSpace(upstream.FFmpegEncoder) != "" ||
+		len(upstream.FFmpegEncoderArgs) > 0
 }
 
 func RenditionDefaultIndex(renditions []*Rendition) int {
@@ -1255,6 +1334,11 @@ func UpstreamWithRendition(upstream *Upstream, rendition *Rendition) *Upstream {
 		Device:            upstream.Device,
 		Path:              upstream.Path,
 		Codec:             upstream.Codec,
+		FFmpegInputFormat: upstream.FFmpegInputFormat,
+		FFmpegInputArgs:   append([]string(nil), upstream.FFmpegInputArgs...),
+		FFmpegFilter:      upstream.FFmpegFilter,
+		FFmpegEncoder:     upstream.FFmpegEncoder,
+		FFmpegEncoderArgs: append([]string(nil), upstream.FFmpegEncoderArgs...),
 		H264Profile:       upstream.H264Profile,
 		Width:             width,
 		Height:            height,
@@ -1305,11 +1389,32 @@ func valueOrEmpty(v *string) string {
 	return strings.TrimSpace(*v)
 }
 
+func valueOrEmptyRenditionFilter(renditions []*Rendition, name string) string {
+	for _, rendition := range renditions {
+		if rendition != nil && rendition.Name == name {
+			return strings.TrimSpace(rendition.FFmpegFilter)
+		}
+	}
+	return ""
+}
+
 func streamWsPath(stream *Stream, upstream *Upstream) string {
 	if stream == nil || !UpstreamServeStream(upstream) {
 		return ""
 	}
-	return fmt.Sprintf("/stream/%s", stream.Name)
+	groupName := strings.TrimSpace(stream.GroupName)
+	if groupName == "" {
+		groupName = stream.Name
+	}
+	path := groupWsPath(groupName)
+	if rendition := strings.TrimSpace(stream.RenditionName); rendition != "" {
+		return path + "?map=" + url.QueryEscape(rendition)
+	}
+	return path
+}
+
+func groupWsPath(name string) string {
+	return fmt.Sprintf("/streams/%s", url.PathEscape(strings.TrimSpace(name)))
 }
 
 func parseKeyframeSinkTargets(raw string) (map[string]bool, error) {
