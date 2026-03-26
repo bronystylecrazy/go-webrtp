@@ -313,6 +313,7 @@ struct CapabilityModeEntry {
     UINT32 width;
     UINT32 height;
     std::vector<double> fps;
+    std::vector<std::string> pixelFormats;
 };
 
 void AppendUniqueFps(std::vector<double> *values, double fps) {
@@ -334,13 +335,57 @@ void SortFps(std::vector<double> *values) {
     std::sort(values->begin(), values->end());
 }
 
-void MergeMode(std::vector<CapabilityModeEntry> *modes, UINT32 width, UINT32 height, double fps) {
+void AppendUniqueFormat(std::vector<std::string> *values, const std::string &format) {
+    if (values == nullptr || format.empty()) {
+        return;
+    }
+    for (const auto &existing : *values) {
+        if (_stricmp(existing.c_str(), format.c_str()) == 0) {
+            return;
+        }
+    }
+    values->push_back(format);
+}
+
+std::string CapabilityFormatLabel(const GUID &subtype) {
+    if (GuidEqual(subtype, MFVideoFormat_H264)) {
+        return "h264";
+    }
+    if (GuidEqual(subtype, MFVideoFormat_HEVC)) {
+        return "h265";
+    }
+    if (GuidEqual(subtype, MFVideoFormat_MJPG)) {
+        return "mjpeg";
+    }
+    if (GuidEqual(subtype, MFVideoFormat_NV12)) {
+        return "nv12";
+    }
+    if (GuidEqual(subtype, MFVideoFormat_YUY2)) {
+        return "yuyv422";
+    }
+    if (GuidEqual(subtype, MFVideoFormat_RGB32)) {
+        return "rgb32";
+    }
+    return "";
+}
+
+void SortFormats(std::vector<std::string> *values) {
+    if (values == nullptr) {
+        return;
+    }
+    std::sort(values->begin(), values->end(), [](const std::string &a, const std::string &b) {
+        return _stricmp(a.c_str(), b.c_str()) < 0;
+    });
+}
+
+void MergeMode(std::vector<CapabilityModeEntry> *modes, UINT32 width, UINT32 height, double fps, const std::string &format) {
     if (modes == nullptr || width == 0 || height == 0) {
         return;
     }
     for (auto &mode : *modes) {
         if (mode.width == width && mode.height == height) {
             AppendUniqueFps(&mode.fps, fps);
+            AppendUniqueFormat(&mode.pixelFormats, format);
             return;
         }
     }
@@ -348,6 +393,7 @@ void MergeMode(std::vector<CapabilityModeEntry> *modes, UINT32 width, UINT32 hei
     mode.width = width;
     mode.height = height;
     AppendUniqueFps(&mode.fps, fps);
+    AppendUniqueFormat(&mode.pixelFormats, format);
     modes->push_back(mode);
 }
 
@@ -371,6 +417,7 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
     IMFSourceReader *reader = nullptr;
     std::vector<CapabilityModeEntry> h264Modes;
     std::vector<CapabilityModeEntry> h265Modes;
+    std::vector<CapabilityModeEntry> rawModes;
     std::wstring name;
     std::wstring id;
     DeviceString(device, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name);
@@ -405,10 +452,13 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
         MFGetAttributeSize(mediaType, MF_MT_FRAME_SIZE, &width, &height);
         MFGetAttributeRatio(mediaType, MF_MT_FRAME_RATE, &frNum, &frDen);
         double fps = (frDen != 0) ? static_cast<double>(frNum) / static_cast<double>(frDen) : 0.0;
+        std::string format = CapabilityFormatLabel(subtype);
         if (GuidEqual(subtype, MFVideoFormat_H264)) {
-            MergeMode(&h264Modes, width, height, fps);
+            MergeMode(&h264Modes, width, height, fps, format);
         } else if (GuidEqual(subtype, MFVideoFormat_HEVC)) {
-            MergeMode(&h265Modes, width, height, fps);
+            MergeMode(&h265Modes, width, height, fps, format);
+        } else if (IsRawOrConvertibleSubtype(subtype)) {
+            MergeMode(&rawModes, width, height, fps, format);
         }
         SafeRelease(&mediaType);
     }
@@ -422,6 +472,7 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
         if (modes == nullptr) return;
         for (auto &mode : *modes) {
             SortFps(&mode.fps);
+            SortFormats(&mode.pixelFormats);
         }
         std::sort(modes->begin(), modes->end(), [](const CapabilityModeEntry &a, const CapabilityModeEntry &b) {
             UINT64 areaA = static_cast<UINT64>(a.width) * static_cast<UINT64>(a.height);
@@ -451,6 +502,25 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
             AppendUniqueFps(&target->fps, fps);
         }
         SortFps(&target->fps);
+        for (const auto &format : mode.pixelFormats) {
+            AppendUniqueFormat(&target->pixelFormats, format);
+        }
+        SortFormats(&target->pixelFormats);
+    }
+    for (const auto &mode : rawModes) {
+        CapabilityModeEntry *target = FindMode(&mergedModes, mode.width, mode.height);
+        if (target == nullptr) {
+            mergedModes.push_back(mode);
+            continue;
+        }
+        for (double fps : mode.fps) {
+            AppendUniqueFps(&target->fps, fps);
+        }
+        SortFps(&target->fps);
+        for (const auto &format : mode.pixelFormats) {
+            AppendUniqueFormat(&target->pixelFormats, format);
+        }
+        SortFormats(&target->pixelFormats);
     }
     sortModes(&mergedModes);
 
@@ -478,6 +548,14 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
                 while (!fpsString.empty() && fpsString.back() == '0') fpsString.pop_back();
                 if (!fpsString.empty() && fpsString.back() == '.') fpsString.pop_back();
                 json += fpsString;
+            }
+            json += "]";
+        }
+        if (!mode.pixelFormats.empty()) {
+            json += ",\"pixelFormats\":[";
+            for (size_t p = 0; p < mode.pixelFormats.size(); p++) {
+                if (p > 0) json += ",";
+                json += "\"" + JsonEscape(mode.pixelFormats[p]) + "\"";
             }
             json += "]";
         }

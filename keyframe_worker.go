@@ -147,7 +147,24 @@ func (s *keyframeSink) logFrameTimings(frameNo uint32, queueDur, decodeDur time.
 }
 
 func logDecoderInfo(logger Logger, worker *decoderWorker) {
-	if worker == nil || worker.h264DiagLog {
+	if worker == nil {
+		return
+	}
+	if worker.h264LastDecodePath == "ffmpeg_fallback" && !worker.h264FallbackLog {
+		info := "ffmpeg_fallback"
+		dbg, ok := worker.h264.(nativeH264DecoderDebug)
+		if ok {
+			if nativeInfo := strings.TrimSpace(dbg.DebugInfo()); nativeInfo != "" {
+				info += " native=" + nativeInfo
+			}
+		}
+		if msg := strings.TrimSpace(worker.h264LastDecodeError); msg != "" {
+			info += " native_error=" + msg
+		}
+		logger.Printf("keyframe decoder info: %s", info)
+		worker.h264FallbackLog = true
+	}
+	if worker.h264DiagLog || worker.h264LastDecodePath != "native" {
 		return
 	}
 	dbg, ok := worker.h264.(nativeH264DecoderDebug)
@@ -169,7 +186,15 @@ func decodeKeyframe(worker *decoderWorker, codec string, width, height int, anne
 		if worker != nil {
 			img, err := worker.decodeH264(annexb)
 			if err == nil && img != nil {
+				worker.h264LastDecodePath = "native"
+				worker.h264LastDecodeError = ""
 				return img, nil
+			}
+			worker.h264LastDecodePath = "ffmpeg_fallback"
+			if err != nil {
+				worker.h264LastDecodeError = err.Error()
+			} else {
+				worker.h264LastDecodeError = "native decoder returned no frame"
 			}
 		}
 		return decodeKeyframeFFmpeg("h264", width, height, annexb)

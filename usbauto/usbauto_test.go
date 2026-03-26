@@ -129,6 +129,32 @@ func TestSelectDarwinPixelFormatFallsBackByResolution(t *testing.T) {
 	}
 }
 
+func TestSelectWindowsInputCodecPrefersMJPEGWhenNoNativeH26x(t *testing.T) {
+	caps := &gwebrtp.UsbDeviceCapabilities{
+		Modes: []*gwebrtp.UsbCapabilityMode{
+			{Width: 3840, Height: 2160, PixelFormats: []string{"mjpeg", "yuyv422"}},
+		},
+	}
+
+	got := selectWindowsInputCodec(caps, Mode{Width: 3840, Height: 2160, FrameRate: 10})
+	if got != "mjpeg" {
+		t.Fatalf("expected mjpeg, got %q", got)
+	}
+}
+
+func TestSelectWindowsInputCodecDoesNotOverrideNativeH264(t *testing.T) {
+	caps := &gwebrtp.UsbDeviceCapabilities{
+		Modes: []*gwebrtp.UsbCapabilityMode{
+			{Width: 3840, Height: 2160, PixelFormats: []string{"h264", "mjpeg"}},
+		},
+	}
+
+	got := selectWindowsInputCodec(caps, Mode{Width: 3840, Height: 2160, FrameRate: 10})
+	if got != "" {
+		t.Fatalf("expected no override when native h264 exists, got %q", got)
+	}
+}
+
 func TestBuildFFmpegArgsPinsSharedFPS(t *testing.T) {
 	args := buildFFmpegArgs(
 		resolvedInput{

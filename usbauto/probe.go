@@ -92,6 +92,8 @@ func selectAutoInputCodec(format string, mode Mode, caps *gwebrtp.UsbDeviceCapab
 	switch {
 	case strings.EqualFold(format, "avfoundation"):
 		return selectDarwinPixelFormat(caps, mode)
+	case strings.EqualFold(format, "dshow"):
+		return selectWindowsInputCodec(caps, mode)
 	default:
 		return ""
 	}
@@ -189,6 +191,35 @@ func defaultDarwinPixelFormat(width, height int) string {
 		return "uyvy422"
 	}
 	return "nv12"
+}
+
+func selectWindowsInputCodec(caps *gwebrtp.UsbDeviceCapabilities, mode Mode) string {
+	if caps == nil {
+		return ""
+	}
+	available := make(map[string]bool)
+	for _, candidate := range caps.Modes {
+		if candidate == nil || candidate.Width != mode.Width || candidate.Height != mode.Height {
+			continue
+		}
+		for _, item := range candidate.PixelFormats {
+			label := strings.ToLower(strings.TrimSpace(item))
+			if label == "" {
+				continue
+			}
+			available[label] = true
+		}
+	}
+	if len(available) == 0 {
+		return ""
+	}
+	if available["h264"] || available["h265"] {
+		return ""
+	}
+	if available["mjpeg"] {
+		return "mjpeg"
+	}
+	return ""
 }
 
 func selectBestMode(modes []*gwebrtp.UsbCapabilityMode, targetFPS float64) Mode {

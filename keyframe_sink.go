@@ -47,9 +47,12 @@ var imageEncodeBufferPool = sync.Pool{
 }
 
 type decoderWorker struct {
-	h264        nativeH264Decoder
-	h264Encoder nativeH264FrameEncoder
-	h264DiagLog bool
+	h264                nativeH264Decoder
+	h264Encoder         nativeH264FrameEncoder
+	h264DiagLog         bool
+	h264FallbackLog     bool
+	h264LastDecodePath  string
+	h264LastDecodeError string
 }
 
 type keyframeJob struct {

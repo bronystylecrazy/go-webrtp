@@ -191,7 +191,8 @@ func writeImage(path string, img image.Image, format string) error {
 }
 
 func encodeImage(img image.Image, format string) ([]byte, error) {
-	if payload, ok, err := tryEncodeImageNative(img, format, 100); ok {
+	quality := defaultKeyframeJPEGQuality()
+	if payload, ok, err := tryEncodeImageNative(img, format, quality); ok {
 		return payload, err
 	}
 	buf := imageEncodeBufferPool.Get().(*bytes.Buffer)
@@ -203,7 +204,7 @@ func encodeImage(img image.Image, format string) ([]byte, error) {
 			return nil, err
 		}
 	case "jpg":
-		if err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 100}); err != nil {
+		if err := jpeg.Encode(buf, img, &jpeg.Options{Quality: quality}); err != nil {
 			return nil, err
 		}
 	default:

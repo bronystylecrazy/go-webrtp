@@ -33,6 +33,12 @@ struct MFH264Decoder {
     bool lastOutputUsedDXGI;
     GUID lastOutputSubtypeGUID;
     std::string lastOutputSubtype;
+    std::string configuredOutputSubtype;
+    std::string lastAccessPath;
+    std::string lastConversionPath;
+    UINT32 lastOutputWidth;
+    UINT32 lastOutputHeight;
+    LONG lastOutputStride;
 };
 
 char *StringDup(const std::string &src) {
@@ -161,10 +167,12 @@ HRESULT ConfigureDecoder(MFH264Decoder *decoder, const uint8_t *sps, int spsLen,
     }
 
     IMFMediaType *outputType = nullptr;
+    std::string configuredOutputSubtype;
     hr = MFCreateMediaType(&outputType);
     if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_ARGB32);
     if (SUCCEEDED(hr)) hr = decoder->transform->SetOutputType(0, outputType, 0);
+    if (SUCCEEDED(hr)) configuredOutputSubtype = "ARGB32";
     if (FAILED(hr)) {
         SafeRelease(&outputType);
         outputType = nullptr;
@@ -172,6 +180,7 @@ HRESULT ConfigureDecoder(MFH264Decoder *decoder, const uint8_t *sps, int spsLen,
         if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         if (SUCCEEDED(hr)) hr = outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
         if (SUCCEEDED(hr)) hr = decoder->transform->SetOutputType(0, outputType, 0);
+        if (SUCCEEDED(hr)) configuredOutputSubtype = "RGB32";
     }
     if (FAILED(hr)) {
         SafeRelease(&inputType);
@@ -183,13 +192,14 @@ HRESULT ConfigureDecoder(MFH264Decoder *decoder, const uint8_t *sps, int spsLen,
     decoder->outputType = outputType;
     decoder->sps = nextSPS;
     decoder->pps = nextPPS;
+    decoder->configuredOutputSubtype = configuredOutputSubtype;
     GUID subtype = GUID_NULL;
     if (SUCCEEDED(outputType->GetGUID(MF_MT_SUBTYPE, &subtype))) {
         decoder->lastOutputSubtypeGUID = subtype;
         decoder->lastOutputSubtype = GuidName(subtype);
     } else {
         decoder->lastOutputSubtypeGUID = GUID_NULL;
-        decoder->lastOutputSubtype.clear();
+        decoder->lastOutputSubtype = "unreported";
     }
     return S_OK;
 }
@@ -287,6 +297,8 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
 
     IMFDXGIBuffer *dxgiBuffer = nullptr;
     bool usedDXGI = false;
+    std::string accessPath = "none";
+    std::string conversionPath = "unknown";
     hr = buffer->QueryInterface(IID_PPV_ARGS(&dxgiBuffer));
     if (SUCCEEDED(hr) && dxgiBuffer != nullptr && decoder != nullptr && decoder->d3d11 != nullptr && decoder->d3d11->device != nullptr && decoder->d3d11->context != nullptr) {
         ID3D11Texture2D *texture = nullptr;
@@ -311,6 +323,7 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
                     scanline0 = static_cast<BYTE *>(mapped.pData);
                     stride = static_cast<LONG>(mapped.RowPitch);
                     usedDXGI = true;
+                    accessPath = "dxgi-staging-map";
                 }
             }
         }
@@ -325,11 +338,15 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
         hr = buffer->QueryInterface(IID_PPV_ARGS(&buffer2D));
         if (SUCCEEDED(hr) && buffer2D != nullptr) {
             hr = buffer2D->Lock2D(&scanline0, &stride);
+            if (SUCCEEDED(hr)) {
+                accessPath = "imf2dbuffer-lock2d";
+            }
         } else {
             hr = buffer->Lock(&raw, &maxLen, &curLen);
             if (SUCCEEDED(hr)) {
                 scanline0 = raw;
                 stride = 0;
+                accessPath = "imfmediabuffer-lock";
             }
         }
     }
@@ -372,6 +389,7 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
         return E_OUTOFMEMORY;
     }
     if (decoder != nullptr && decoder->lastOutputSubtypeGUID == MFVideoFormat_NV12) {
+        conversionPath = "nv12-to-rgba";
         const BYTE *srcY = scanline0;
         const BYTE *srcUV = scanline0 + static_cast<size_t>(stride) * height;
         LONG uvStride = stride;
@@ -393,6 +411,7 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
             }
         }
     } else if (decoder != nullptr && decoder->lastOutputSubtypeGUID == MFVideoFormat_YUY2) {
+        conversionPath = "yuy2-to-rgba";
         if (stride == 0) {
             stride = static_cast<LONG>(width * 2);
         }
@@ -418,6 +437,7 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
             }
         }
     } else {
+        conversionPath = "bgra-rgba-swap";
         if (stride == 0) {
             stride = outBytesPerRow;
         }
@@ -450,6 +470,13 @@ HRESULT CopyOutputBuffer(MFH264Decoder *decoder, IMFSample *sample, IMFMediaType
     *outWidth = static_cast<int>(width);
     *outHeight = static_cast<int>(height);
     *outStride = outBytesPerRow;
+    if (decoder != nullptr) {
+        decoder->lastAccessPath = accessPath;
+        decoder->lastConversionPath = conversionPath;
+        decoder->lastOutputWidth = width;
+        decoder->lastOutputHeight = height;
+        decoder->lastOutputStride = outBytesPerRow;
+    }
     return S_OK;
 }
 
@@ -483,6 +510,12 @@ extern "C" void *WebrtpMFH264DecoderCreate(char **errOut) {
     decoder->lastOutputUsedDXGI = false;
     decoder->lastOutputSubtypeGUID = GUID_NULL;
     decoder->lastOutputSubtype.clear();
+    decoder->configuredOutputSubtype.clear();
+    decoder->lastAccessPath = "uninitialized";
+    decoder->lastConversionPath = "uninitialized";
+    decoder->lastOutputWidth = 0;
+    decoder->lastOutputHeight = 0;
+    decoder->lastOutputStride = 0;
     std::string d3dErr;
     if (SUCCEEDED(AcquireMFD3D11Resources(&decoder->d3d11, &d3dErr)) && decoder->d3d11 != nullptr) {
         BindTransformToD3D11(transform, decoder->d3d11);
@@ -613,9 +646,21 @@ extern "C" char *WebrtpMFH264DecoderDebugInfo(void *ref) {
     std::string info = "mf_decoder";
     info += " d3d11=";
     info += (decoder->d3d11 != nullptr ? "true" : "false");
-    info += " output_subtype=";
+    info += " configured_output=";
+    info += decoder->configuredOutputSubtype.empty() ? "unknown" : decoder->configuredOutputSubtype;
+    info += " actual_output=";
     info += decoder->lastOutputSubtype.empty() ? "unknown" : decoder->lastOutputSubtype;
+    info += " access_path=";
+    info += decoder->lastAccessPath.empty() ? "unknown" : decoder->lastAccessPath;
+    info += " conversion=";
+    info += decoder->lastConversionPath.empty() ? "unknown" : decoder->lastConversionPath;
     info += " dxgi_output=";
     info += (decoder->lastOutputUsedDXGI ? "true" : "false");
+    info += " size=";
+    info += std::to_string(decoder->lastOutputWidth);
+    info += "x";
+    info += std::to_string(decoder->lastOutputHeight);
+    info += " stride=";
+    info += std::to_string(decoder->lastOutputStride);
     return StringDup(info);
 }

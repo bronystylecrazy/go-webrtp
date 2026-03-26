@@ -95,6 +95,13 @@ func (d *openH264Decoder) Close() error {
 	return d.dec.Close()
 }
 
+func (d *openH264Decoder) DebugInfo() string {
+	if d == nil || d.dec == nil {
+		return "openh264_decoder"
+	}
+	return "openh264_decoder"
+}
+
 func (d *mediaFoundationH264Decoder) Decode(annexb []byte) (image.Image, error) {
 	if len(annexb) == 0 {
 		return nil, fmt.Errorf("empty h264 payload")
