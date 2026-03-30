@@ -111,6 +111,9 @@ func (r *cpuKeyframeRenderer) rectifyDeskView(src *image.RGBA, normalizedQuad []
 		return nil, fmt.Errorf("rectifyDeskView needs 4 points")
 	}
 	b := src.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil
+	}
 	cache, err := r.getRectifyCache(b.Dx(), b.Dy(), normalizedQuad)
 	if err != nil {
 		return nil, err
@@ -179,7 +182,10 @@ func (r *cpuKeyframeRenderer) getRectifyCache(srcWidth, srcHeight int, normalize
 	}
 	srcQuad := make([]point, 4)
 	for i, p := range normalizedQuad {
-		srcQuad[i] = point{x: p.x * float64(srcWidth), y: p.y * float64(srcHeight)}
+		srcQuad[i] = point{
+			x: clamp01(p.x) * float64(srcWidth-1),
+			y: clamp01(p.y) * float64(srcHeight-1),
+		}
 	}
 	top := math.Hypot(srcQuad[1].x-srcQuad[0].x, srcQuad[1].y-srcQuad[0].y)
 	bottom := math.Hypot(srcQuad[2].x-srcQuad[3].x, srcQuad[2].y-srcQuad[3].y)
@@ -187,16 +193,6 @@ func (r *cpuKeyframeRenderer) getRectifyCache(srcWidth, srcHeight int, normalize
 	right := math.Hypot(srcQuad[2].x-srcQuad[1].x, srcQuad[2].y-srcQuad[1].y)
 	outWidth := maxInt(80, int(math.Round((top+bottom)/2)))
 	outHeight := maxInt(80, int(math.Round((left+right)/2)))
-	dstQuad := []point{
-		{0, 0},
-		{float64(outWidth - 1), 0},
-		{float64(outWidth - 1), float64(outHeight - 1)},
-		{0, float64(outHeight - 1)},
-	}
-	h, err := computeHomography(dstQuad, srcQuad)
-	if err != nil {
-		return nil, err
-	}
 	cache := &rectifyMapCache{
 		srcWidth:  srcWidth,
 		srcHeight: srcHeight,
@@ -206,11 +202,13 @@ func (r *cpuKeyframeRenderer) getRectifyCache(srcWidth, srcHeight int, normalize
 		uv:        make([]float32, outWidth*outHeight*2),
 	}
 	for y := 0; y < outHeight; y++ {
+		v := float64(y) / float64(maxInt(1, outHeight-1))
 		row := y * outWidth * 2
 		for x := 0; x < outWidth; x++ {
-			sx, sy := projectPoint(h, float64(x), float64(y))
-			cache.uv[row+x*2] = float32(clamp01(sx / float64(maxInt(1, srcWidth-1))))
-			cache.uv[row+x*2+1] = float32(clamp01(sy / float64(maxInt(1, srcHeight-1))))
+			u := float64(x) / float64(maxInt(1, outWidth-1))
+			srcPt := bilinearQuadPoint(srcQuad, u, v)
+			cache.uv[row+x*2] = float32(clamp01(srcPt.x / float64(maxInt(1, srcWidth-1))))
+			cache.uv[row+x*2+1] = float32(clamp01(srcPt.y / float64(maxInt(1, srcHeight-1))))
 		}
 	}
 	r.rectifyCache = cache

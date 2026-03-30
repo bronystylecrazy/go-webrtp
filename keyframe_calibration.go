@@ -198,32 +198,37 @@ func rectifyDeskView(src image.Image, normalizedQuad []point) (image.Image, erro
 	}
 	srcRGBA := imageToRGBA(src)
 	b := srcRGBA.Bounds()
-	srcWidth := float64(b.Dx())
-	srcHeight := float64(b.Dy())
-	srcQuad := make([]point, 4)
-	for i, p := range normalizedQuad {
-		srcQuad[i] = point{x: p.x * srcWidth, y: p.y * srcHeight}
+	srcWidth := b.Dx()
+	srcHeight := b.Dy()
+	if srcWidth <= 0 || srcHeight <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1)), nil
 	}
-	top := math.Hypot(srcQuad[1].x-srcQuad[0].x, srcQuad[1].y-srcQuad[0].y)
-	bottom := math.Hypot(srcQuad[2].x-srcQuad[3].x, srcQuad[2].y-srcQuad[3].y)
-	left := math.Hypot(srcQuad[3].x-srcQuad[0].x, srcQuad[3].y-srcQuad[0].y)
-	right := math.Hypot(srcQuad[2].x-srcQuad[1].x, srcQuad[2].y-srcQuad[1].y)
+	quad := make([]point, 4)
+	for i, p := range normalizedQuad {
+		quad[i] = point{
+			x: clamp01(p.x) * float64(srcWidth-1),
+			y: clamp01(p.y) * float64(srcHeight-1),
+		}
+	}
+	top := math.Hypot(quad[1].x-quad[0].x, quad[1].y-quad[0].y)
+	bottom := math.Hypot(quad[2].x-quad[3].x, quad[2].y-quad[3].y)
+	left := math.Hypot(quad[3].x-quad[0].x, quad[3].y-quad[0].y)
+	right := math.Hypot(quad[2].x-quad[1].x, quad[2].y-quad[1].y)
 	outWidth := maxInt(80, int(math.Round((top+bottom)/2)))
 	outHeight := maxInt(80, int(math.Round((left+right)/2)))
-	dstQuad := []point{{0, 0}, {float64(outWidth - 1), 0}, {float64(outWidth - 1), float64(outHeight - 1)}, {0, float64(outHeight - 1)}}
-	h, err := computeHomography(dstQuad, srcQuad)
-	if err != nil {
-		return nil, err
-	}
 	dst := image.NewRGBA(image.Rect(0, 0, outWidth, outHeight))
 	parallelizeRows(outHeight, func(y0, y1 int) {
 		for y := y0; y < y1; y++ {
 			dstRow := y * dst.Stride
+			v := float64(y) / float64(maxInt(1, outHeight-1))
 			for x := 0; x < outWidth; x++ {
-				sx, sy := projectPoint(h, float64(x), float64(y))
-				u := sx / float64(maxInt(1, b.Dx()-1))
-				v := sy / float64(maxInt(1, b.Dy()-1))
-				c := sampleBilinearRGBA(srcRGBA, clamp01(u), clamp01(v))
+				u := float64(x) / float64(maxInt(1, outWidth-1))
+				srcPt := bilinearQuadPoint(quad, u, v)
+				c := sampleBilinearRGBA(
+					srcRGBA,
+					clamp01(srcPt.x/float64(maxInt(1, srcWidth-1))),
+					clamp01(srcPt.y/float64(maxInt(1, srcHeight-1))),
+				)
 				dstPix := dstRow + x*4
 				dst.Pix[dstPix+0] = c.R
 				dst.Pix[dstPix+1] = c.G
@@ -233,6 +238,21 @@ func rectifyDeskView(src image.Image, normalizedQuad []point) (image.Image, erro
 		}
 	})
 	return dst, nil
+}
+
+func bilinearQuadPoint(q []point, u, v float64) point {
+	a := q[0]
+	b := q[1]
+	c := q[2]
+	d := q[3]
+
+	au := 1 - u
+	av := 1 - v
+
+	return point{
+		x: a.x*au*av + b.x*u*av + c.x*u*v + d.x*au*v,
+		y: a.y*au*av + b.y*u*av + c.y*u*v + d.y*au*v,
+	}
 }
 
 func parallelizeRows(height int, fn func(y0, y1 int)) {
