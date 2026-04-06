@@ -28,6 +28,8 @@ type options struct {
 	bestBitrateKbps    int
 	previewBitrateKbps int
 	streamBuffer       int
+	maxWidth           int
+	maxHeight          int
 	logger             logger
 }
 
@@ -124,6 +126,18 @@ func WithStreamBuffer(size int) Option {
 	return func(o *options) {
 		if size >= 0 {
 			o.streamBuffer = size
+		}
+	}
+}
+
+// WithMaxResolution limits the selected resolution to at most w x h.
+func WithMaxResolution(w, h int) Option {
+	return func(o *options) {
+		if w > 0 {
+			o.maxWidth = w
+		}
+		if h > 0 {
+			o.maxHeight = h
 		}
 	}
 }

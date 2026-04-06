@@ -15,7 +15,7 @@ func TestSelectBestModePrefersHighestResolutionAtTargetFPS(t *testing.T) {
 		{Width: 1280, Height: 720, Fps: []float64{60}},
 	}
 
-	got := selectBestMode(modes, 10)
+	got := selectBestMode(modes, 10, 0, 0)
 	if got.Width != 3840 || got.Height != 2160 || got.FrameRate != 10 {
 		t.Fatalf("unexpected mode: %+v", got)
 	}
@@ -28,7 +28,7 @@ func TestSelectBestModeFallsBackWhenHighestModeMissesTargetFPS(t *testing.T) {
 		{Width: 1920, Height: 1080, Fps: []float64{30}},
 	}
 
-	got := selectBestMode(modes, 10)
+	got := selectBestMode(modes, 10, 0, 0)
 	if got.Width != 2560 || got.Height != 1440 || got.FrameRate != 10 {
 		t.Fatalf("unexpected mode: %+v", got)
 	}
@@ -41,8 +41,21 @@ func TestSelectBestModeWithoutFPSPreferencePicksHighestResolution(t *testing.T) 
 		{Width: 1920, Height: 1080, Fps: []float64{30}},
 	}
 
-	got := selectBestMode(modes, 0)
+	got := selectBestMode(modes, 0, 0, 0)
 	if got.Width != 3840 || got.Height != 2160 || got.FrameRate != 5 {
+		t.Fatalf("unexpected mode: %+v", got)
+	}
+}
+
+func TestSelectBestModeHonorsMaxResolution(t *testing.T) {
+	modes := []*gwebrtp.UsbCapabilityMode{
+		{Width: 3840, Height: 2160, Fps: []float64{10}},
+		{Width: 2560, Height: 1440, Fps: []float64{30}},
+		{Width: 1920, Height: 1080, Fps: []float64{60}},
+	}
+
+	got := selectBestMode(modes, 0, 3839, 2159)
+	if got.Width != 2560 || got.Height != 1440 || got.FrameRate != 30 {
 		t.Fatalf("unexpected mode: %+v", got)
 	}
 }
@@ -75,6 +88,19 @@ func TestParseV4L2Formats(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected candidates:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestSelectLinuxModeHonorsMaxResolution(t *testing.T) {
+	candidates := []linuxModeCandidate{
+		{mode: Mode{Width: 3840, Height: 2160, FrameRate: 10}, codec: "mjpeg"},
+		{mode: Mode{Width: 2560, Height: 1440, FrameRate: 30}, codec: "mjpeg"},
+		{mode: Mode{Width: 1920, Height: 1080, FrameRate: 60}, codec: "yuyv422"},
+	}
+
+	got := selectLinuxMode(candidates, 0, 3839, 2159)
+	if got.mode.Width != 2560 || got.mode.Height != 1440 || got.mode.FrameRate != 30 {
+		t.Fatalf("unexpected mode: %+v", got)
 	}
 }
 

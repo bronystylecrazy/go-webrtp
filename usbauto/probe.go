@@ -41,7 +41,7 @@ func resolveInput(deviceID string, cfg options) (resolvedInput, error) {
 		if err != nil {
 			return resolvedInput{}, fmt.Errorf("usbauto: query capabilities: %w", err)
 		}
-		mode = selectBestMode(caps.Modes, cfg.targetFPS)
+		mode = selectBestMode(caps.Modes, cfg.targetFPS, cfg.maxWidth, cfg.maxHeight)
 		if mode.Width <= 0 || mode.Height <= 0 {
 			return resolvedInput{}, fmt.Errorf("usbauto: no usable video modes reported for %s", deviceID)
 		}
@@ -60,7 +60,7 @@ func resolveInput(deviceID string, cfg options) (resolvedInput, error) {
 		if err != nil {
 			return resolvedInput{}, err
 		}
-		selected := selectLinuxMode(candidates, cfg.targetFPS)
+		selected := selectLinuxMode(candidates, cfg.targetFPS, cfg.maxWidth, cfg.maxHeight)
 		if selected.mode.Width <= 0 || selected.mode.Height <= 0 {
 			return resolvedInput{}, fmt.Errorf("usbauto: no usable v4l2 modes reported for %s", deviceID)
 		}
@@ -222,21 +222,27 @@ func selectWindowsInputCodec(caps *gwebrtp.UsbDeviceCapabilities, mode Mode) str
 	return ""
 }
 
-func selectBestMode(modes []*gwebrtp.UsbCapabilityMode, targetFPS float64) Mode {
-	best := selectBestModeWithFilter(modes, targetFPS, true)
+func selectBestMode(modes []*gwebrtp.UsbCapabilityMode, targetFPS float64, maxW, maxH int) Mode {
+	best := selectBestModeWithFilter(modes, targetFPS, true, maxW, maxH)
 	if best.Width > 0 && best.Height > 0 {
 		return best
 	}
-	return selectBestModeWithFilter(modes, targetFPS, false)
+	return selectBestModeWithFilter(modes, targetFPS, false, maxW, maxH)
 }
 
-func selectBestModeWithFilter(modes []*gwebrtp.UsbCapabilityMode, targetFPS float64, requireFPS bool) Mode {
+func selectBestModeWithFilter(modes []*gwebrtp.UsbCapabilityMode, targetFPS float64, requireFPS bool, maxW, maxH int) Mode {
 	var best Mode
 	bestArea := -1
 	bestFPS := -1.0
 
 	for _, mode := range modes {
 		if mode == nil || mode.Width <= 0 || mode.Height <= 0 {
+			continue
+		}
+		if maxW > 0 && mode.Width > maxW {
+			continue
+		}
+		if maxH > 0 && mode.Height > maxH {
 			continue
 		}
 		fps := highestFPS(mode.Fps)
@@ -283,15 +289,15 @@ func probeLinuxModes(deviceID string) ([]linuxModeCandidate, error) {
 	return candidates, nil
 }
 
-func selectLinuxMode(candidates []linuxModeCandidate, targetFPS float64) linuxModeCandidate {
-	best := selectLinuxModeWithFilter(candidates, targetFPS, true)
+func selectLinuxMode(candidates []linuxModeCandidate, targetFPS float64, maxW, maxH int) linuxModeCandidate {
+	best := selectLinuxModeWithFilter(candidates, targetFPS, true, maxW, maxH)
 	if best.mode.Width > 0 && best.mode.Height > 0 {
 		return best
 	}
-	return selectLinuxModeWithFilter(candidates, targetFPS, false)
+	return selectLinuxModeWithFilter(candidates, targetFPS, false, maxW, maxH)
 }
 
-func selectLinuxModeWithFilter(candidates []linuxModeCandidate, targetFPS float64, requireFPS bool) linuxModeCandidate {
+func selectLinuxModeWithFilter(candidates []linuxModeCandidate, targetFPS float64, requireFPS bool, maxW, maxH int) linuxModeCandidate {
 	var best linuxModeCandidate
 	bestArea := -1
 	bestFPS := -1.0
@@ -299,6 +305,12 @@ func selectLinuxModeWithFilter(candidates []linuxModeCandidate, targetFPS float6
 
 	for _, candidate := range candidates {
 		if candidate.mode.Width <= 0 || candidate.mode.Height <= 0 {
+			continue
+		}
+		if maxW > 0 && candidate.mode.Width > maxW {
+			continue
+		}
+		if maxH > 0 && candidate.mode.Height > maxH {
 			continue
 		}
 		fps := candidate.mode.FrameRate

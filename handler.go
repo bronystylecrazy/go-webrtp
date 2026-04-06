@@ -7,6 +7,14 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+const resumeKeyframeTimeout = 2 * time.Second
+
+type resumeWaitState struct {
+	waiting         bool
+	requested       bool
+	waitingStarted  time.Time
+}
+
 func (r *Instance) Handler() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
@@ -83,8 +91,8 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 	}()
 
-	waitForResumeKeyframe := false
 	expectedNextFrameNo := startupFrameNo + 1
+	resumeState := &resumeWaitState{}
 	for frame := range ch {
 		if frame == nil {
 			continue
@@ -92,14 +100,13 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 		if frame.FrameNo <= startupFrameNo {
 			continue
 		}
-		if expectedNextFrameNo > 0 && frame.FrameNo > expectedNextFrameNo {
-			waitForResumeKeyframe = true
+		send, closeConn := r.handleResumeGap(resumeState, frame, expectedNextFrameNo)
+		if closeConn {
+			r.logger.Printf("closing stalled client after frame gap: %s", conn.RemoteAddr())
+			return
 		}
-		if waitForResumeKeyframe {
-			if !frame.IsKey {
-				continue
-			}
-			waitForResumeKeyframe = false
+		if !send {
+			continue
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
 		if err := conn.WriteMessage(websocket.BinaryMessage, frame.Data); err != nil {
@@ -107,4 +114,35 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 		}
 		expectedNextFrameNo = frame.FrameNo + 1
 	}
+}
+
+func (r *Instance) handleResumeGap(state *resumeWaitState, frame *Frame, expectedNextFrameNo uint64) (send bool, closeConn bool) {
+	if state == nil || frame == nil {
+		return frame != nil, false
+	}
+
+	if !state.waiting && expectedNextFrameNo > 0 && frame.FrameNo > expectedNextFrameNo {
+		state.waiting = true
+		state.waitingStarted = time.Now()
+		if !state.requested {
+			if err := r.ForceNextKeyFrame(); err == nil {
+				r.logger.Printf("requested recovery keyframe after client frame gap")
+			}
+			state.requested = true
+		}
+	}
+
+	if !state.waiting {
+		return true, false
+	}
+	if frame.IsKey {
+		state.waiting = false
+		state.requested = false
+		state.waitingStarted = time.Time{}
+		return true, false
+	}
+	if !state.waitingStarted.IsZero() && time.Since(state.waitingStarted) >= resumeKeyframeTimeout {
+		return false, true
+	}
+	return false, false
 }
