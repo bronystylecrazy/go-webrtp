@@ -282,3 +282,97 @@ func TestResolveInputCandidatesDeduplicatesAndSkipsEmpty(t *testing.T) {
 		t.Fatalf("unexpected candidates:\n got: %#v\nwant: %#v", got, want)
 	}
 }
+
+func TestFfmpegEncoderListedParsesRealOutput(t *testing.T) {
+	// * verbatim shape of `ffmpeg -encoders`, whose trailing column is the codec, not the encoder
+	output := strings.Join([]string{
+		"Encoders:",
+		" V..... = Video",
+		" ------",
+		" V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)",
+		" V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)",
+		" V....D hevc_videotoolbox    VideoToolbox H.265 Encoder (codec hevc)",
+		"",
+	}, "\n")
+
+	for _, name := range []string{"libx264", "h264_videotoolbox", "hevc_videotoolbox"} {
+		if !ffmpegEncoderListed(output, name) {
+			t.Fatalf("expected %s to be detected", name)
+		}
+	}
+	for _, name := range []string{"h264", "h264)", "videotoolbox", "h264_nvenc"} {
+		if ffmpegEncoderListed(output, name) {
+			t.Fatalf("expected %s not to be detected", name)
+		}
+	}
+}
+
+func TestHardwareEncoderCandidatesPerPlatform(t *testing.T) {
+	cases := map[string][]string{
+		"darwin":  {"h264_videotoolbox"},
+		"windows": {"h264_nvenc", "h264_qsv", "h264_amf"},
+		"linux":   {"h264_nvenc", "h264_qsv"},
+		"freebsd": nil,
+	}
+	for goos, want := range cases {
+		got := hardwareEncoderCandidates(goos)
+		if len(got) != len(want) {
+			t.Fatalf("%s: expected %v, got %v", goos, want, got)
+		}
+		for idx := range want {
+			if got[idx] != want[idx] {
+				t.Fatalf("%s: expected %v, got %v", goos, want, got)
+			}
+		}
+	}
+}
+
+func TestResolveEncoderPrefersFirstUsableCandidate(t *testing.T) {
+	prevProbe := encoderProbe
+	prevGOOS := currentGOOS
+	defer func() {
+		encoderProbe = prevProbe
+		currentGOOS = prevGOOS
+	}()
+
+	currentGOOS = "windows"
+	// * nvenc is listed but unusable on this box, so selection must fall through to the next candidate
+	encoderProbe = func(name string) bool { return name == "h264_amf" }
+
+	cfg := resolveEncoder(options{})
+	if cfg.encoder != "h264_amf" {
+		t.Fatalf("expected h264_amf, got %q", cfg.encoder)
+	}
+	if len(cfg.encoderArgs) != 0 {
+		t.Fatalf("expected no encoder args for a hardware encoder, got %v", cfg.encoderArgs)
+	}
+}
+
+func TestResolveEncoderFallsBackWhenNoHardwareUsable(t *testing.T) {
+	prevProbe := encoderProbe
+	prevGOOS := currentGOOS
+	defer func() {
+		encoderProbe = prevProbe
+		currentGOOS = prevGOOS
+	}()
+
+	currentGOOS = "windows"
+	encoderProbe = func(string) bool { return false }
+
+	cfg := resolveEncoder(options{})
+	if cfg.encoder != "libx264" {
+		t.Fatalf("expected libx264 fallback, got %q", cfg.encoder)
+	}
+	if len(cfg.encoderArgs) == 0 {
+		t.Fatalf("expected libx264 args on fallback")
+	}
+}
+
+func TestFfmpegEncoderRunArgsEncodesOneRealFrame(t *testing.T) {
+	args := strings.Join(ffmpegEncoderRunArgs("h264_nvenc"), " ")
+	for _, want := range []string{"-f lavfi", "-frames:v 1", "-c:v h264_nvenc", "-f null"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("expected probe args to contain %q, got %s", want, args)
+		}
+	}
+}
