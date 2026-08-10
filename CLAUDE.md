@@ -27,3 +27,17 @@
   e.g., `func(ctx context.Context, req *UserRequest) (*Response)`, `make([]*webrtp.StreamStats, 0)`, `[]*User`.
 - Use external libraries for any non-trivial logic, e.g., `go-humanize` for file size, try not to implement the logic
   yourself, and do not copy and paste the code from other places, but use the library instead.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `bronystylecrazy/go-webrtp`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, used verbatim: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
