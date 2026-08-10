@@ -7,6 +7,8 @@
 #include <wmcodecdsp.h>
 #include <codecapi.h>
 #include <windows.h>
+#include <dshow.h>
+#include <dvdmedia.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -281,6 +283,12 @@ HRESULT DeviceListString(std::string *resultOut) {
             result.append(idUtf8);
             result.push_back('\t');
             result.append(nameUtf8);
+            result.push_back('\t');
+            UINT32 hwSource = 0;
+            HRESULT hwHr = devices[idx]->GetUINT32(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_HW_SOURCE, &hwSource);
+            if (SUCCEEDED(hwHr)) {
+                result.append(hwSource != 0 ? "1" : "0");
+            }
         }
         free(idUtf8);
         free(nameUtf8);
@@ -409,6 +417,65 @@ CapabilityModeEntry *FindMode(std::vector<CapabilityModeEntry> *modes, UINT32 wi
     return nullptr;
 }
 
+void SortModeEntries(std::vector<CapabilityModeEntry> *modes) {
+    if (modes == nullptr) return;
+    for (auto &mode : *modes) {
+        SortFps(&mode.fps);
+        SortFormats(&mode.pixelFormats);
+    }
+    std::sort(modes->begin(), modes->end(), [](const CapabilityModeEntry &a, const CapabilityModeEntry &b) {
+        UINT64 areaA = static_cast<UINT64>(a.width) * static_cast<UINT64>(a.height);
+        UINT64 areaB = static_cast<UINT64>(b.width) * static_cast<UINT64>(b.height);
+        if (areaA == areaB) {
+            if (a.width == b.width) return a.height < b.height;
+            return a.width < b.width;
+        }
+        return areaA < areaB;
+    });
+}
+
+std::string CapabilitiesJsonBuild(const std::wstring &id, const std::wstring &name, const std::vector<std::string> &codecs, const std::string &bitrateControl, const std::vector<CapabilityModeEntry> &modes) {
+    std::string json = "{";
+    json += "\"device\":{\"id\":\"" + JsonEscape(WideToUtf8String(id)) + "\",\"name\":\"" + JsonEscape(WideToUtf8String(name)) + "\"},";
+    json += "\"codecs\":[";
+    for (size_t i = 0; i < codecs.size(); i++) {
+        if (i > 0) json += ",";
+        json += "\"" + codecs[i] + "\"";
+    }
+    json += "],";
+    json += "\"bitrateControl\":\"" + bitrateControl + "\",";
+    json += "\"modes\":[";
+    for (size_t i = 0; i < modes.size(); i++) {
+        if (i > 0) json += ",";
+        const auto &mode = modes[i];
+        json += "{\"width\":" + std::to_string(mode.width) + ",\"height\":" + std::to_string(mode.height);
+        if (!mode.fps.empty()) {
+            json += ",\"fps\":[";
+            for (size_t f = 0; f < mode.fps.size(); f++) {
+                if (f > 0) json += ",";
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%.2f", mode.fps[f]);
+                std::string fpsString(buf);
+                while (!fpsString.empty() && fpsString.back() == '0') fpsString.pop_back();
+                if (!fpsString.empty() && fpsString.back() == '.') fpsString.pop_back();
+                json += fpsString;
+            }
+            json += "]";
+        }
+        if (!mode.pixelFormats.empty()) {
+            json += ",\"pixelFormats\":[";
+            for (size_t p = 0; p < mode.pixelFormats.size(); p++) {
+                if (p > 0) json += ",";
+                json += "\"" + JsonEscape(mode.pixelFormats[p]) + "\"";
+            }
+            json += "]";
+        }
+        json += "}";
+    }
+    json += "]}";
+    return json;
+}
+
 HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
     if (device == nullptr || resultOut == nullptr) {
         return E_POINTER;
@@ -468,24 +535,8 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
         return hr;
     }
 
-    auto sortModes = [](std::vector<CapabilityModeEntry> *modes) {
-        if (modes == nullptr) return;
-        for (auto &mode : *modes) {
-            SortFps(&mode.fps);
-            SortFormats(&mode.pixelFormats);
-        }
-        std::sort(modes->begin(), modes->end(), [](const CapabilityModeEntry &a, const CapabilityModeEntry &b) {
-            UINT64 areaA = static_cast<UINT64>(a.width) * static_cast<UINT64>(a.height);
-            UINT64 areaB = static_cast<UINT64>(b.width) * static_cast<UINT64>(b.height);
-            if (areaA == areaB) {
-                if (a.width == b.width) return a.height < b.height;
-                return a.width < b.width;
-            }
-            return areaA < areaB;
-        });
-    };
-    sortModes(&h264Modes);
-    sortModes(&h265Modes);
+    SortModeEntries(&h264Modes);
+    SortModeEntries(&h265Modes);
 
     std::vector<std::string> codecs;
     if (!h264Modes.empty()) codecs.push_back("h264");
@@ -522,47 +573,9 @@ HRESULT DeviceCapabilitiesJson(IMFActivate *device, std::string *resultOut) {
         }
         SortFormats(&target->pixelFormats);
     }
-    sortModes(&mergedModes);
+    SortModeEntries(&mergedModes);
 
-    std::string json = "{";
-    json += "\"device\":{\"id\":\"" + JsonEscape(WideToUtf8String(id)) + "\",\"name\":\"" + JsonEscape(WideToUtf8String(name)) + "\"},";
-    json += "\"codecs\":[";
-    for (size_t i = 0; i < codecs.size(); i++) {
-        if (i > 0) json += ",";
-        json += "\"" + codecs[i] + "\"";
-    }
-    json += "],";
-    json += "\"bitrateControl\":\"native\",";
-    json += "\"modes\":[";
-    for (size_t i = 0; i < mergedModes.size(); i++) {
-        if (i > 0) json += ",";
-        const auto &mode = mergedModes[i];
-        json += "{\"width\":" + std::to_string(mode.width) + ",\"height\":" + std::to_string(mode.height);
-        if (!mode.fps.empty()) {
-            json += ",\"fps\":[";
-            for (size_t f = 0; f < mode.fps.size(); f++) {
-                if (f > 0) json += ",";
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%.2f", mode.fps[f]);
-                std::string fpsString(buf);
-                while (!fpsString.empty() && fpsString.back() == '0') fpsString.pop_back();
-                if (!fpsString.empty() && fpsString.back() == '.') fpsString.pop_back();
-                json += fpsString;
-            }
-            json += "]";
-        }
-        if (!mode.pixelFormats.empty()) {
-            json += ",\"pixelFormats\":[";
-            for (size_t p = 0; p < mode.pixelFormats.size(); p++) {
-                if (p > 0) json += ",";
-                json += "\"" + JsonEscape(mode.pixelFormats[p]) + "\"";
-            }
-            json += "]";
-        }
-        json += "}";
-    }
-    json += "]}";
-    *resultOut = json;
+    *resultOut = CapabilitiesJsonBuild(id, name, codecs, "native", mergedModes);
     return S_OK;
 }
 
@@ -1352,6 +1365,290 @@ extern "C" char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOu
     if (FAILED(hr)) {
         if (errOut != nullptr) {
             *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "query usb capabilities"));
+        }
+        return nullptr;
+    }
+    return StringDup(result);
+}
+
+namespace {
+
+struct DshowMonikerEntry {
+    IMoniker *moniker;
+    std::wstring displayName;
+    std::wstring friendlyName;
+    bool devicePathReadable;
+};
+
+GUID DshowFourccSubtype(DWORD fourcc) {
+    GUID guid = {fourcc, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+    return guid;
+}
+
+std::string DshowFormatLabel(const GUID &subtype) {
+    if (GuidEqual(subtype, MEDIASUBTYPE_YUY2)) {
+        return "yuyv422";
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_UYVY)) {
+        return "uyvy422";
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_NV12)) {
+        return "nv12";
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_MJPG)) {
+        return "mjpeg";
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_RGB24)) {
+        return "bgr24";
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_RGB32)) {
+        return "rgb32";
+    }
+    if (GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('H', '2', '6', '4')))) {
+        return "h264";
+    }
+    if (GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('I', '4', '2', '0')))) {
+        return "yuv420p";
+    }
+    return "";
+}
+
+void DshowFreeMediaType(AM_MEDIA_TYPE *mediaType) {
+    if (mediaType == nullptr) {
+        return;
+    }
+    if (mediaType->cbFormat != 0 && mediaType->pbFormat != nullptr) {
+        CoTaskMemFree(mediaType->pbFormat);
+    }
+    if (mediaType->pUnk != nullptr) {
+        mediaType->pUnk->Release();
+    }
+    CoTaskMemFree(mediaType);
+}
+
+void DshowMergeMediaType(const AM_MEDIA_TYPE *mediaType, std::vector<CapabilityModeEntry> *modes) {
+    if (mediaType == nullptr || modes == nullptr || !GuidEqual(mediaType->majortype, MEDIATYPE_Video) || mediaType->pbFormat == nullptr) {
+        return;
+    }
+    UINT32 width = 0;
+    UINT32 height = 0;
+    REFERENCE_TIME avgTimePerFrame = 0;
+    if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+        const VIDEOINFOHEADER *header = reinterpret_cast<const VIDEOINFOHEADER *>(mediaType->pbFormat);
+        width = static_cast<UINT32>(header->bmiHeader.biWidth);
+        height = static_cast<UINT32>(header->bmiHeader.biHeight < 0 ? -header->bmiHeader.biHeight : header->bmiHeader.biHeight);
+        avgTimePerFrame = header->AvgTimePerFrame;
+    } else if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo2) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        const VIDEOINFOHEADER2 *header = reinterpret_cast<const VIDEOINFOHEADER2 *>(mediaType->pbFormat);
+        width = static_cast<UINT32>(header->bmiHeader.biWidth);
+        height = static_cast<UINT32>(header->bmiHeader.biHeight < 0 ? -header->bmiHeader.biHeight : header->bmiHeader.biHeight);
+        avgTimePerFrame = header->AvgTimePerFrame;
+    } else {
+        return;
+    }
+    double fps = (avgTimePerFrame > 0) ? 10000000.0 / static_cast<double>(avgTimePerFrame) : 0.0;
+    MergeMode(modes, width, height, fps, DshowFormatLabel(mediaType->subtype));
+}
+
+HRESULT DshowCollectMonikers(std::vector<DshowMonikerEntry> *entriesOut) {
+    ICreateDevEnum *devEnum = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_ICreateDevEnum, reinterpret_cast<void **>(&devEnum));
+    if (FAILED(hr)) {
+        return hr;
+    }
+    IEnumMoniker *enumMoniker = nullptr;
+    hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enumMoniker, 0);
+    SafeRelease(&devEnum);
+    if (hr != S_OK) {
+        return FAILED(hr) ? hr : S_OK;
+    }
+    IMoniker *moniker = nullptr;
+    while (enumMoniker->Next(1, &moniker, nullptr) == S_OK) {
+        DshowMonikerEntry entry;
+        entry.moniker = moniker;
+        entry.devicePathReadable = false;
+        LPOLESTR displayName = nullptr;
+        if (SUCCEEDED(moniker->GetDisplayName(nullptr, nullptr, &displayName)) && displayName != nullptr) {
+            entry.displayName = displayName;
+            CoTaskMemFree(displayName);
+        }
+        IPropertyBag *bag = nullptr;
+        if (SUCCEEDED(moniker->BindToStorage(nullptr, nullptr, IID_IPropertyBag, reinterpret_cast<void **>(&bag))) && bag != nullptr) {
+            VARIANT value;
+            VariantInit(&value);
+            if (SUCCEEDED(bag->Read(L"FriendlyName", &value, nullptr)) && value.vt == VT_BSTR && value.bstrVal != nullptr) {
+                entry.friendlyName = value.bstrVal;
+            }
+            VariantClear(&value);
+            VariantInit(&value);
+            entry.devicePathReadable = SUCCEEDED(bag->Read(L"DevicePath", &value, nullptr));
+            VariantClear(&value);
+            SafeRelease(&bag);
+        }
+        entriesOut->push_back(entry);
+        moniker = nullptr;
+    }
+    SafeRelease(&enumMoniker);
+    return S_OK;
+}
+
+void DshowReleaseMonikers(std::vector<DshowMonikerEntry> *entries) {
+    if (entries == nullptr) {
+        return;
+    }
+    for (auto &entry : *entries) {
+        SafeRelease(&entry.moniker);
+    }
+}
+
+void DshowPinMediaTypes(IPin *pin, std::vector<CapabilityModeEntry> *modes) {
+    if (pin == nullptr || modes == nullptr) {
+        return;
+    }
+    IAMStreamConfig *config = nullptr;
+    if (SUCCEEDED(pin->QueryInterface(IID_IAMStreamConfig, reinterpret_cast<void **>(&config))) && config != nullptr) {
+        int count = 0;
+        int size = 0;
+        if (SUCCEEDED(config->GetNumberOfCapabilities(&count, &size)) && size == static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+            std::vector<BYTE> capsBuffer(static_cast<size_t>(size));
+            for (int idx = 0; idx < count; idx++) {
+                AM_MEDIA_TYPE *mediaType = nullptr;
+                if (FAILED(config->GetStreamCaps(idx, &mediaType, capsBuffer.data())) || mediaType == nullptr) {
+                    continue;
+                }
+                DshowMergeMediaType(mediaType, modes);
+                DshowFreeMediaType(mediaType);
+            }
+        }
+        SafeRelease(&config);
+        if (!modes->empty()) {
+            return;
+        }
+    }
+    IEnumMediaTypes *enumTypes = nullptr;
+    if (SUCCEEDED(pin->EnumMediaTypes(&enumTypes)) && enumTypes != nullptr) {
+        AM_MEDIA_TYPE *mediaType = nullptr;
+        while (enumTypes->Next(1, &mediaType, nullptr) == S_OK) {
+            DshowMergeMediaType(mediaType, modes);
+            DshowFreeMediaType(mediaType);
+            mediaType = nullptr;
+        }
+        SafeRelease(&enumTypes);
+    }
+}
+
+HRESULT DshowCapabilitiesJson(IMoniker *moniker, const std::wstring &id, const std::wstring &name, std::string *resultOut) {
+    if (moniker == nullptr || resultOut == nullptr) {
+        return E_POINTER;
+    }
+    IBaseFilter *filter = nullptr;
+    HRESULT hr = moniker->BindToObject(nullptr, nullptr, IID_IBaseFilter, reinterpret_cast<void **>(&filter));
+    if (FAILED(hr) || filter == nullptr) {
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    std::vector<CapabilityModeEntry> modes;
+    IEnumPins *enumPins = nullptr;
+    hr = filter->EnumPins(&enumPins);
+    if (SUCCEEDED(hr) && enumPins != nullptr) {
+        IPin *pin = nullptr;
+        while (enumPins->Next(1, &pin, nullptr) == S_OK) {
+            PIN_DIRECTION direction;
+            if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_OUTPUT) {
+                DshowPinMediaTypes(pin, &modes);
+            }
+            SafeRelease(&pin);
+        }
+        SafeRelease(&enumPins);
+    }
+    SafeRelease(&filter);
+    SortModeEntries(&modes);
+    std::vector<std::string> codecs;
+    codecs.push_back("h264");
+    *resultOut = CapabilitiesJsonBuild(id, name, codecs, "target", modes);
+    return S_OK;
+}
+
+}  // namespace
+
+extern "C" char *WebrtpUsbWinDshowDeviceList(char **errOut) {
+    HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool uninitialize = SUCCEEDED(initHr);
+    std::vector<DshowMonikerEntry> entries;
+    HRESULT hr = DshowCollectMonikers(&entries);
+    if (FAILED(hr)) {
+        DshowReleaseMonikers(&entries);
+        if (uninitialize) {
+            CoUninitialize();
+        }
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "list directshow devices"));
+        }
+        return nullptr;
+    }
+    std::string result;
+    for (auto &entry : entries) {
+        if (entry.displayName.empty()) {
+            continue;
+        }
+        char *idUtf8 = WideToUtf8Dup(entry.displayName);
+        char *nameUtf8 = WideToUtf8Dup(entry.friendlyName);
+        if (idUtf8 != nullptr) {
+            if (!result.empty()) {
+                result.push_back('\n');
+            }
+            result.append(idUtf8);
+            result.push_back('\t');
+            if (nameUtf8 != nullptr) {
+                result.append(nameUtf8);
+            }
+            result.push_back('\t');
+            result.append(entry.devicePathReadable ? "1" : "0");
+        }
+        free(idUtf8);
+        free(nameUtf8);
+    }
+    DshowReleaseMonikers(&entries);
+    if (uninitialize) {
+        CoUninitialize();
+    }
+    return StringDup(result);
+}
+
+extern "C" char *WebrtpUsbWinDshowDeviceCapabilities(const char *device, char **errOut) {
+    HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool uninitialize = SUCCEEDED(initHr);
+    std::wstring needle = Utf8ToWide(device);
+    std::vector<DshowMonikerEntry> entries;
+    HRESULT hr = DshowCollectMonikers(&entries);
+    if (FAILED(hr)) {
+        DshowReleaseMonikers(&entries);
+        if (uninitialize) {
+            CoUninitialize();
+        }
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "list directshow devices"));
+        }
+        return nullptr;
+    }
+    std::string result;
+    hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    for (auto &entry : entries) {
+        if (entry.devicePathReadable) {
+            continue;
+        }
+        if (_wcsicmp(entry.displayName.c_str(), needle.c_str()) != 0 && _wcsicmp(entry.friendlyName.c_str(), needle.c_str()) != 0) {
+            continue;
+        }
+        hr = DshowCapabilitiesJson(entry.moniker, entry.displayName, entry.friendlyName, &result);
+        break;
+    }
+    DshowReleaseMonikers(&entries);
+    if (uninitialize) {
+        CoUninitialize();
+    }
+    if (FAILED(hr)) {
+        if (errOut != nullptr) {
+            *errOut = WideToUtf8Dup(CaptureErrorMessage(hr, "find directshow device"));
         }
         return nullptr;
     }

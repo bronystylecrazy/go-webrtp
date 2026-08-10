@@ -25,7 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,7 +155,21 @@ func WebrtpUsbMacError(handle C.uintptr_t, msg *C.char) {
 	entry.cancel()
 }
 
-func UsbDeviceList() ([]*UsbDevice, error) {
+type macDeviceProvider struct{}
+
+func init() {
+	DeviceProviderRegister(&macDeviceProvider{})
+}
+
+func (r *macDeviceProvider) DeviceProviderName() string {
+	return "avfoundation"
+}
+
+func (r *macDeviceProvider) DeviceProviderPrecedence() int {
+	return DeviceProviderPrecedenceNative
+}
+
+func (r *macDeviceProvider) DeviceList() ([]*UsbDevice, error) {
 	var cErr *C.char
 	result := C.WebrtpUsbMacDeviceList(&cErr)
 	if result == nil {
@@ -168,42 +181,21 @@ func UsbDeviceList() ([]*UsbDevice, error) {
 	}
 	defer C.free(unsafe.Pointer(result))
 
-	lines := strings.Split(strings.TrimSpace(C.GoString(result)), "\n")
-	devices := make([]*UsbDevice, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		device := &UsbDevice{}
-		device.Id = parts[0]
-		if len(parts) > 1 && parts[1] != "" {
-			device.Name = parts[1]
+	rows := usbDeviceLinesParse(C.GoString(result))
+	devices := make([]*UsbDevice, 0, len(rows))
+	for _, row := range rows {
+		device := &UsbDevice{Id: row[0], Kind: UsbDeviceKindHardware}
+		if len(row) > 1 && row[1] != "" {
+			device.Name = row[1]
 		} else {
-			device.Name = parts[0]
+			device.Name = row[0]
 		}
 		devices = append(devices, device)
 	}
-	slices.SortFunc(devices, func(a, b *UsbDevice) int {
-		if a.Name == b.Name {
-			if a.Id < b.Id {
-				return -1
-			}
-			if a.Id > b.Id {
-				return 1
-			}
-			return 0
-		}
-		if a.Name < b.Name {
-			return -1
-		}
-		return 1
-	})
 	return devices, nil
 }
 
-func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
+func (r *macDeviceProvider) DeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	cDevice := C.CString(device)
 	defer C.free(unsafe.Pointer(cDevice))
 
@@ -222,6 +214,5 @@ func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
 		return nil, fmt.Errorf("parse usb capabilities: %w", err)
 	}
-	populateSuggestedUsbRenditions(caps)
 	return caps, nil
 }

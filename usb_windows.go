@@ -3,7 +3,7 @@
 package webrtp
 
 /*
-#cgo LDFLAGS: -lole32 -lmfplat -lmf -lmfuuid -lmfreadwrite -lpropsys
+#cgo LDFLAGS: -lole32 -loleaut32 -lmfplat -lmf -lmfuuid -lmfreadwrite -lpropsys -lstrmiids -luuid
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -16,6 +16,8 @@ WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *
 void WebrtpUsbWinCaptureStop(WebrtpUsbWinCaptureRef ref);
 char *WebrtpUsbWinDeviceList(char **errOut);
 char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOut);
+char *WebrtpUsbWinDshowDeviceList(char **errOut);
+char *WebrtpUsbWinDshowDeviceCapabilities(const char *device, char **errOut);
 */
 import "C"
 
@@ -23,7 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,7 +149,24 @@ func WebrtpUsbWinError(handle C.uintptr_t, msg *C.char) {
 	entry.cancel()
 }
 
-func UsbDeviceList() ([]*UsbDevice, error) {
+type mfDeviceProvider struct{}
+
+type dshowDeviceProvider struct{}
+
+func init() {
+	DeviceProviderRegister(&mfDeviceProvider{})
+	DeviceProviderRegister(&dshowDeviceProvider{})
+}
+
+func (r *mfDeviceProvider) DeviceProviderName() string {
+	return "mediafoundation"
+}
+
+func (r *mfDeviceProvider) DeviceProviderPrecedence() int {
+	return DeviceProviderPrecedenceNative
+}
+
+func (r *mfDeviceProvider) DeviceList() ([]*UsbDevice, error) {
 	var cErr *C.char
 	result := C.WebrtpUsbWinDeviceList(&cErr)
 	if result == nil {
@@ -160,41 +178,26 @@ func UsbDeviceList() ([]*UsbDevice, error) {
 	}
 	defer C.free(unsafe.Pointer(result))
 
-	lines := strings.Split(strings.TrimSpace(C.GoString(result)), "\n")
-	devices := make([]*UsbDevice, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		device := &UsbDevice{Id: parts[0]}
-		if len(parts) > 1 && parts[1] != "" {
-			device.Name = parts[1]
+	rows := usbDeviceLinesParse(C.GoString(result))
+	devices := make([]*UsbDevice, 0, len(rows))
+	for _, row := range rows {
+		device := &UsbDevice{Id: row[0]}
+		if len(row) > 1 && row[1] != "" {
+			device.Name = row[1]
 		} else {
-			device.Name = parts[0]
+			device.Name = row[0]
 		}
+		hwSource := ""
+		if len(row) > 2 {
+			hwSource = row[2]
+		}
+		device.Kind = UsbMfKindClassify(hwSource)
 		devices = append(devices, device)
 	}
-	slices.SortFunc(devices, func(a, b *UsbDevice) int {
-		if a.Name == b.Name {
-			if a.Id < b.Id {
-				return -1
-			}
-			if a.Id > b.Id {
-				return 1
-			}
-			return 0
-		}
-		if a.Name < b.Name {
-			return -1
-		}
-		return 1
-	})
 	return devices, nil
 }
 
-func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
+func (r *mfDeviceProvider) DeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	cDevice := C.CString(device)
 	defer C.free(unsafe.Pointer(cDevice))
 
@@ -213,6 +216,62 @@ func UsbDeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
 	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
 		return nil, fmt.Errorf("parse usb capabilities: %w", err)
 	}
-	populateSuggestedUsbRenditions(caps)
+	return caps, nil
+}
+
+func (r *dshowDeviceProvider) DeviceProviderName() string {
+	return "directshow"
+}
+
+func (r *dshowDeviceProvider) DeviceProviderPrecedence() int {
+	return DeviceProviderPrecedenceVirtual
+}
+
+func (r *dshowDeviceProvider) DeviceList() ([]*UsbDevice, error) {
+	var cErr *C.char
+	result := C.WebrtpUsbWinDshowDeviceList(&cErr)
+	if result == nil {
+		if cErr != nil {
+			defer C.free(unsafe.Pointer(cErr))
+			return nil, fmt.Errorf("list directshow devices: %s", C.GoString(cErr))
+		}
+		return make([]*UsbDevice, 0), nil
+	}
+	defer C.free(unsafe.Pointer(result))
+
+	rows := usbDeviceLinesParse(C.GoString(result))
+	entries := make([]*UsbDshowMoniker, 0, len(rows))
+	for _, row := range rows {
+		entry := &UsbDshowMoniker{Id: row[0]}
+		if len(row) > 1 {
+			entry.Name = row[1]
+		}
+		if len(row) > 2 {
+			entry.DevicePathReadable = row[2] == "1"
+		}
+		entries = append(entries, entry)
+	}
+	return UsbDshowSoftwareDevicesSelect(entries), nil
+}
+
+func (r *dshowDeviceProvider) DeviceCapabilitiesGet(device string) (*UsbDeviceCapabilities, error) {
+	cDevice := C.CString(device)
+	defer C.free(unsafe.Pointer(cDevice))
+
+	var cErr *C.char
+	result := C.WebrtpUsbWinDshowDeviceCapabilities(cDevice, &cErr)
+	if result == nil {
+		if cErr != nil {
+			defer C.free(unsafe.Pointer(cErr))
+			return nil, fmt.Errorf("directshow capabilities: %s", C.GoString(cErr))
+		}
+		return nil, fmt.Errorf("directshow capabilities: unknown error")
+	}
+	defer C.free(unsafe.Pointer(result))
+
+	caps := &UsbDeviceCapabilities{}
+	if err := json.Unmarshal([]byte(C.GoString(result)), caps); err != nil {
+		return nil, fmt.Errorf("parse directshow capabilities: %w", err)
+	}
 	return caps, nil
 }

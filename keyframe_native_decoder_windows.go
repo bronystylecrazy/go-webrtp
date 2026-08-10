@@ -3,7 +3,7 @@
 package webrtp
 
 /*
-#cgo LDFLAGS: -lole32 -loleaut32 -lmfplat -lmf -lmfuuid -lpropsys -ld3d11 -ldxgi
+#cgo LDFLAGS: -lole32 -loleaut32 -lmfplat -lmf -lmfuuid -lpropsys -ld3d11 -ldxgi -ldxguid -luuid -lwmcodecdspuuid
 #include <stdint.h>
 #include <stdlib.h>
 

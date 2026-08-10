@@ -470,8 +470,10 @@ func sanitizeUsbDevice(device *webrtp.UsbDevice) *webrtp.UsbDevice {
 		return nil
 	}
 	return &webrtp.UsbDevice{
-		Id:   hashDeviceID(device.Id),
-		Name: device.Name,
+		Id:       hashDeviceID(device.Id),
+		Name:     device.Name,
+		Kind:     device.Kind,
+		Provider: device.Provider,
 	}
 }
 
@@ -586,16 +588,19 @@ func main() {
 	kong.Parse(&CLI)
 
 	if CLI.ListUsbDevices {
-		devices, err := webrtp.UsbDeviceList()
+		devices, err := webrtp.UsbDeviceListDetailed()
 		if err != nil {
-			log.Fatalf("list usb devices: %v", err)
+			if len(devices) == 0 {
+				log.Fatalf("list usb devices: %v", err)
+			}
+			log.Printf("list usb devices (partial): %v", err)
 		}
 		if len(devices) == 0 {
 			log.Printf("No USB video devices found")
 			return
 		}
 		for _, device := range devices {
-			log.Printf("%s\t%s", device.Id, device.Name)
+			log.Printf("%s\t%s\t%s", device.Id, device.Name, device.Kind)
 		}
 		return
 	}

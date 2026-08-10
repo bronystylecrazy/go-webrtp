@@ -31,6 +31,11 @@ func (r *Instance) connectWithRetry() error {
 			cancel()
 			return nil
 		}
+		if r.cfg.SourceType == "usb" {
+			if reason := UsbDeviceOfflineReason(r.cfg.Device); reason != "" {
+				r.logger.Printf("%s", reason)
+			}
+		}
 		r.logger.Printf("source connect failed: %v", err)
 		cancel()
 		time.Sleep(10 * time.Second)

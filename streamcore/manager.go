@@ -20,9 +20,10 @@ import (
 )
 
 type Config struct {
-	TelemetryServiceName *string     `yaml:"telemetryServiceName"`
-	TelemetryEndpoint    *string     `yaml:"telemetryEndpoint"`
-	Upstreams            []*Upstream `yaml:"upstreams"`
+	TelemetryServiceName *string                    `yaml:"telemetryServiceName"`
+	TelemetryEndpoint    *string                    `yaml:"telemetryEndpoint"`
+	SyntheticDevices     []*gwebrtp.SyntheticDevice `yaml:"syntheticDevices,omitempty"`
+	Upstreams            []*Upstream                `yaml:"upstreams"`
 }
 
 type Upstream struct {
@@ -225,6 +226,11 @@ func NewManager(options ...ManagerOption) (*Manager, error) {
 	}
 	if opts.config == nil {
 		opts.config = &Config{}
+	}
+	if opts.config.SyntheticDevices != nil {
+		if err := gwebrtp.SyntheticDevicesConfigure(opts.config.SyntheticDevices); err != nil {
+			return nil, err
+		}
 	}
 	m := &Manager{
 		configPath:    opts.configPath,

@@ -3,6 +3,8 @@ package streamcore
 import (
 	"runtime"
 	"testing"
+
+	gwebrtp "github.com/bronystylecrazy/go-webrtp"
 )
 
 func TestManagerCreateUpdateDeleteRoundTrip(t *testing.T) {
@@ -276,5 +278,47 @@ func TestUSBFFmpegRenditionFilterValidation(t *testing.T) {
 	_, err := NewManager(WithConfigFile(""), WithConfig(cfg))
 	if err == nil || err.Error() != "rendition cam1 ffmpegFilter requires usb ffmpeg mode" {
 		t.Fatalf("expected usb ffmpeg mode validation error, got %v", err)
+	}
+}
+
+func TestManagerConfiguresSyntheticDevices(t *testing.T) {
+	defer func() {
+		_ = gwebrtp.SyntheticDevicesConfigure(nil)
+	}()
+
+	manager, err := NewManager(
+		WithConfigFile(""),
+		WithConfig(&Config{
+			SyntheticDevices: []*gwebrtp.SyntheticDevice{
+				{Id: "testPattern", Type: "pattern"},
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer manager.Close()
+
+	device, ok := gwebrtp.SyntheticDeviceResolve("testPattern")
+	if !ok || device.Width != 1280 || device.Height != 720 {
+		t.Fatalf("expected configured synthetic device with defaults, got %+v ok=%v", device, ok)
+	}
+}
+
+func TestManagerRejectsMalformedSyntheticDevices(t *testing.T) {
+	defer func() {
+		_ = gwebrtp.SyntheticDevicesConfigure(nil)
+	}()
+
+	_, err := NewManager(
+		WithConfigFile(""),
+		WithConfig(&Config{
+			SyntheticDevices: []*gwebrtp.SyntheticDevice{
+				{Id: "clip", Type: "file"},
+			},
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected malformed synthetic device declaration to be rejected")
 	}
 }

@@ -312,11 +312,12 @@ func DeviceSocketHandler() fiber.Handler {
 
 			lastDevices := make(map[string]*webrtp.UsbDevice)
 			sendDevices := func(force bool) error {
-				devices, err := webrtp.UsbDeviceList()
+				devices, err := webrtp.UsbDeviceListDetailed()
 				message := &DeviceSocketMessage{}
 				if err != nil {
 					message.Error = err.Error()
-				} else {
+				}
+				if err == nil || len(devices) > 0 {
 					sanitized := sanitizeUsbDevices(devices)
 					sortUsbDevices(sanitized)
 					current := usbDeviceMap(sanitized)
