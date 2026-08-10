@@ -611,9 +611,17 @@ A purpose-built probe (`win-device-probe.cpp`, cross-compiled with mingw-w64) wa
 
 End-to-end confirmation: `webrtp --list-usb-devices` on the same host listed the C270 as `hardware` (by MF symbolic link) and OBS Virtual Camera as `virtual` (by DirectShow moniker), each exactly once.
 
+### Verified afterwards on macOS
+
+macOS 27.0 with OBS 32.2.1. Once the camera extension is enabled — `systemextensionsctl list` reporting `[activated enabled]` rather than `[activated waiting for user]` — `OBS Virtual Camera` is returned by the AVFoundation discovery session, identified by its CoreMediaIO device UID, with no CoreMediaIO call anywhere in the path. This resolves item 1 below and confirms the correction above: CMIOExtension is the mechanism, and asking for the external device type is sufficient.
+
+**Operational caveat, discovered by observation.** A macOS process does **not** pick up a camera extension that is enabled after the process starts. Two enumerations on the same machine seconds apart disagreed: a long-running process returned two devices, a freshly started one returned three including the virtual camera. AVFoundation appears to bind to the set of registered extensions at the time the process first connects, and no amount of re-enumeration within that process recovers.
+
+This is materially different from Windows, where a virtual camera starting and stopping is picked up by ordinary polling. On macOS, *registration* of the extension is bound at process start; only the camera's running state is dynamic afterwards. Any application offering a device picker must therefore be restarted after the user enables a virtual camera for the first time, and should say so rather than appearing broken.
+
 ### Everything labelled UNVERIFIED in this document
 
-1. That an activated OBS/CMIO camera extension surfaces specifically as `AVCaptureDeviceTypeExternal` (Apple's sample says to ask for it; not observed first-hand — the extension on the test machine was awaiting user consent).
+1. ~~That an activated OBS/CMIO camera extension surfaces specifically as `AVCaptureDeviceTypeExternal` (Apple's sample says to ask for it; not observed first-hand — the extension on the test machine was awaiting user consent).~~ **RESOLVED — observed first-hand on macOS 27.0 with OBS 32.2.1. Once the camera extension is enabled (`systemextensionsctl list` reports `[activated enabled]`), `OBS Virtual Camera` is returned by the AVFoundation discovery session with the external device type and no CoreMediaIO call, carrying the CMIO device UID as its identifier. It reports `hardware`, per the accepted macOS gap in item 2.**
 2. Any first-party API that identifies an `AVCaptureDevice` as a virtual camera — none found in the macOS 27.0 SDK.
 3. Why `kCMIOHardwarePropertyAllowScreenCaptureDevices` reads 0 in a fresh process when the header says it defaults to 1.
 4. An explicit Microsoft statement that `MFEnumDeviceSources` does not return DirectShow-only software filters (inferred structurally).
