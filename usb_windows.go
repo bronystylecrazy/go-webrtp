@@ -12,7 +12,7 @@ typedef void *WebrtpUsbWinCaptureRef;
 extern void WebrtpUsbWinPacket(uintptr_t handle, void *data, int length, uint32_t pts90k);
 extern void WebrtpUsbWinError(uintptr_t handle, char *msg);
 
-WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut);
+WebrtpUsbWinCaptureRef WebrtpUsbWinCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, int useDshow, uintptr_t handle, char **errOut);
 void WebrtpUsbWinCaptureStop(WebrtpUsbWinCaptureRef ref);
 char *WebrtpUsbWinDeviceList(char **errOut);
 char *WebrtpUsbWinDeviceCapabilities(const char *device, char **errOut);
@@ -69,6 +69,17 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 		return nil, fmt.Errorf("usb source requires codec to be h264 or h265")
 	}
 
+	useDshow := 0
+	if entries, dshowErr := (&dshowDeviceProvider{}).MonikerList(); dshowErr == nil {
+		if entry, ok := UsbDshowDeviceMatch(entries, device); ok {
+			if codec != "h264" {
+				return nil, fmt.Errorf("usb source %s is a directshow virtual device and supports codec h264 only", device)
+			}
+			useDshow = 1
+			device = entry.Id
+		}
+	}
+
 	usbCtx, cancel := context.WithCancel(ctx)
 	conn := &usbConn{cancel: cancel}
 	handler := &videoHandler{hub: r.hub, logger: r.logger, instance: r}
@@ -88,7 +99,7 @@ func (r *Instance) connectUsb(ctx context.Context) (*usbConn, error) {
 	defer C.free(unsafe.Pointer(cH264Profile))
 
 	var cErr *C.char
-	ref := C.WebrtpUsbWinCaptureStart(cDevice, cCodec, cH264Profile, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(r.cfg.FrameRate), C.int(r.cfg.BitrateKbps), C.uintptr_t(handle), &cErr)
+	ref := C.WebrtpUsbWinCaptureStart(cDevice, cCodec, cH264Profile, C.int(r.cfg.Width), C.int(r.cfg.Height), C.double(r.cfg.FrameRate), C.int(r.cfg.BitrateKbps), C.int(useDshow), C.uintptr_t(handle), &cErr)
 	if ref == nil {
 		usbRegistry.Delete(handle)
 		cancel()
@@ -227,7 +238,7 @@ func (r *dshowDeviceProvider) DeviceProviderPrecedence() int {
 	return DeviceProviderPrecedenceVirtual
 }
 
-func (r *dshowDeviceProvider) DeviceList() ([]*UsbDevice, error) {
+func (r *dshowDeviceProvider) MonikerList() ([]*UsbDshowMoniker, error) {
 	var cErr *C.char
 	result := C.WebrtpUsbWinDshowDeviceList(&cErr)
 	if result == nil {
@@ -235,7 +246,7 @@ func (r *dshowDeviceProvider) DeviceList() ([]*UsbDevice, error) {
 			defer C.free(unsafe.Pointer(cErr))
 			return nil, fmt.Errorf("list directshow devices: %s", C.GoString(cErr))
 		}
-		return make([]*UsbDevice, 0), nil
+		return make([]*UsbDshowMoniker, 0), nil
 	}
 	defer C.free(unsafe.Pointer(result))
 
@@ -250,6 +261,14 @@ func (r *dshowDeviceProvider) DeviceList() ([]*UsbDevice, error) {
 			entry.DevicePathReadable = row[2] == "1"
 		}
 		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func (r *dshowDeviceProvider) DeviceList() ([]*UsbDevice, error) {
+	entries, err := r.MonikerList()
+	if err != nil {
+		return nil, err
 	}
 	return UsbDshowSoftwareDevicesSelect(entries), nil
 }

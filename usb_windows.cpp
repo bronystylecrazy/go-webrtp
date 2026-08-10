@@ -36,9 +36,12 @@ struct WinCapture {
     int height;
     double fps;
     int bitrateKbps;
+    bool useDshow;
     bool started;
     std::string error;
 };
+
+bool DshowCaptureRun(WinCapture *capture);
 
 struct MediaTypeSelection {
     IMFMediaType *type;
@@ -1079,6 +1082,17 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
         return 1;
     }
 
+    if (capture->useDshow) {
+        if (!DshowCaptureRun(capture) && capture->error.empty()) {
+            capture->error = "directshow device not found";
+        }
+        if (!capture->started) {
+            SetEvent(capture->readyEvent);
+        }
+        MfShutdownScoped();
+        return capture->started ? 0 : 1;
+    }
+
     IMFActivate *device = nullptr;
     IMFMediaSource *source = nullptr;
     IMFSourceReader *reader = nullptr;
@@ -1093,6 +1107,10 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
     do {
         hr = FindDevice(capture->device, &device);
         if (FAILED(hr)) {
+            // * a device media foundation cannot see may still be a directshow software filter
+            if (DshowCaptureRun(capture)) {
+                break;
+            }
             capture->error = WideToUtf8String(CaptureErrorMessage(hr, "find usb device"));
             break;
         }
@@ -1249,7 +1267,7 @@ DWORD WINAPI CaptureThreadMain(LPVOID param) {
 
 }  // namespace
 
-extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, uintptr_t handle, char **errOut) {
+extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec, const char *h264Profile, int width, int height, double fps, int bitrateKbps, int useDshow, uintptr_t handle, char **errOut) {
     WinCapture *capture = new WinCapture();
     capture->thread = nullptr;
     capture->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1262,6 +1280,7 @@ extern "C" void *WebrtpUsbWinCaptureStart(const char *device, const char *codec,
     capture->height = height;
     capture->fps = fps;
     capture->bitrateKbps = bitrateKbps;
+    capture->useDshow = useDshow != 0;
     capture->started = false;
 
     if (capture->stopEvent == nullptr || capture->readyEvent == nullptr) {
@@ -1413,7 +1432,7 @@ std::string DshowFormatLabel(const GUID &subtype) {
     return "";
 }
 
-void DshowFreeMediaType(AM_MEDIA_TYPE *mediaType) {
+void DshowClearMediaType(AM_MEDIA_TYPE *mediaType) {
     if (mediaType == nullptr) {
         return;
     }
@@ -1423,27 +1442,78 @@ void DshowFreeMediaType(AM_MEDIA_TYPE *mediaType) {
     if (mediaType->pUnk != nullptr) {
         mediaType->pUnk->Release();
     }
+    memset(mediaType, 0, sizeof(*mediaType));
+}
+
+void DshowFreeMediaType(AM_MEDIA_TYPE *mediaType) {
+    if (mediaType == nullptr) {
+        return;
+    }
+    DshowClearMediaType(mediaType);
     CoTaskMemFree(mediaType);
 }
 
+HRESULT DshowCopyMediaType(AM_MEDIA_TYPE *dst, const AM_MEDIA_TYPE *src) {
+    if (dst == nullptr || src == nullptr) {
+        return E_POINTER;
+    }
+    *dst = *src;
+    dst->pbFormat = nullptr;
+    if (src->cbFormat != 0 && src->pbFormat != nullptr) {
+        dst->pbFormat = static_cast<BYTE *>(CoTaskMemAlloc(src->cbFormat));
+        if (dst->pbFormat == nullptr) {
+            dst->cbFormat = 0;
+            return E_OUTOFMEMORY;
+        }
+        memcpy(dst->pbFormat, src->pbFormat, src->cbFormat);
+    }
+    if (dst->pUnk != nullptr) {
+        dst->pUnk->AddRef();
+    }
+    return S_OK;
+}
+
+bool DshowMediaTypeGeometry(const AM_MEDIA_TYPE *mediaType, UINT32 *widthOut, UINT32 *heightOut, REFERENCE_TIME *avgTimePerFrameOut) {
+    if (mediaType == nullptr || mediaType->pbFormat == nullptr) {
+        return false;
+    }
+    LONG width = 0;
+    LONG height = 0;
+    REFERENCE_TIME avgTimePerFrame = 0;
+    if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+        const VIDEOINFOHEADER *header = reinterpret_cast<const VIDEOINFOHEADER *>(mediaType->pbFormat);
+        width = header->bmiHeader.biWidth;
+        height = header->bmiHeader.biHeight;
+        avgTimePerFrame = header->AvgTimePerFrame;
+    } else if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo2) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+        const VIDEOINFOHEADER2 *header = reinterpret_cast<const VIDEOINFOHEADER2 *>(mediaType->pbFormat);
+        width = header->bmiHeader.biWidth;
+        height = header->bmiHeader.biHeight;
+        avgTimePerFrame = header->AvgTimePerFrame;
+    } else {
+        return false;
+    }
+    if (widthOut != nullptr) {
+        *widthOut = static_cast<UINT32>(width < 0 ? -width : width);
+    }
+    if (heightOut != nullptr) {
+        // * yuv frames are top down regardless of sign, so only the magnitude matters here
+        *heightOut = static_cast<UINT32>(height < 0 ? -height : height);
+    }
+    if (avgTimePerFrameOut != nullptr) {
+        *avgTimePerFrameOut = avgTimePerFrame;
+    }
+    return true;
+}
+
 void DshowMergeMediaType(const AM_MEDIA_TYPE *mediaType, std::vector<CapabilityModeEntry> *modes) {
-    if (mediaType == nullptr || modes == nullptr || !GuidEqual(mediaType->majortype, MEDIATYPE_Video) || mediaType->pbFormat == nullptr) {
+    if (mediaType == nullptr || modes == nullptr || !GuidEqual(mediaType->majortype, MEDIATYPE_Video)) {
         return;
     }
     UINT32 width = 0;
     UINT32 height = 0;
     REFERENCE_TIME avgTimePerFrame = 0;
-    if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER)) {
-        const VIDEOINFOHEADER *header = reinterpret_cast<const VIDEOINFOHEADER *>(mediaType->pbFormat);
-        width = static_cast<UINT32>(header->bmiHeader.biWidth);
-        height = static_cast<UINT32>(header->bmiHeader.biHeight < 0 ? -header->bmiHeader.biHeight : header->bmiHeader.biHeight);
-        avgTimePerFrame = header->AvgTimePerFrame;
-    } else if (GuidEqual(mediaType->formattype, FORMAT_VideoInfo2) && mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-        const VIDEOINFOHEADER2 *header = reinterpret_cast<const VIDEOINFOHEADER2 *>(mediaType->pbFormat);
-        width = static_cast<UINT32>(header->bmiHeader.biWidth);
-        height = static_cast<UINT32>(header->bmiHeader.biHeight < 0 ? -header->bmiHeader.biHeight : header->bmiHeader.biHeight);
-        avgTimePerFrame = header->AvgTimePerFrame;
-    } else {
+    if (!DshowMediaTypeGeometry(mediaType, &width, &height, &avgTimePerFrame)) {
         return;
     }
     double fps = (avgTimePerFrame > 0) ? 10000000.0 / static_cast<double>(avgTimePerFrame) : 0.0;
@@ -1566,6 +1636,791 @@ HRESULT DshowCapabilitiesJson(IMoniker *moniker, const std::wstring &id, const s
     codecs.push_back("h264");
     *resultOut = CapabilitiesJsonBuild(id, name, codecs, "target", modes);
     return S_OK;
+}
+
+const GUID DshowSinkFilterClsid = {0x7f9a4f80, 0x2f3b, 0x4e59, {0x9c, 0x1d, 0x51, 0x1e, 0x0b, 0x9a, 0x33, 0x21}};
+
+struct DshowFrameContext {
+    WinCapture *capture;
+    H264EncoderContext *encoder;
+    CRITICAL_SECTION lock;
+    HANDLE eosEvent;
+    LONGLONG frameIndex;
+    LONGLONG frameDuration;
+    bool running;
+};
+
+bool DshowSinkSubtypeAccepted(const GUID &subtype) {
+    return GuidEqual(subtype, MEDIASUBTYPE_NV12) ||
+           GuidEqual(subtype, MEDIASUBTYPE_YUY2) ||
+           GuidEqual(subtype, MEDIASUBTYPE_YV12) ||
+           GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('I', '4', '2', '0'))) ||
+           GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('I', 'Y', 'U', 'V')));
+}
+
+bool DshowSinkTypeAccepted(const AM_MEDIA_TYPE *mediaType) {
+    if (mediaType == nullptr || !GuidEqual(mediaType->majortype, MEDIATYPE_Video) || !DshowSinkSubtypeAccepted(mediaType->subtype)) {
+        return false;
+    }
+    UINT32 width = 0;
+    UINT32 height = 0;
+    return DshowMediaTypeGeometry(mediaType, &width, &height, nullptr) && width > 0 && height > 0;
+}
+
+double DshowCaptureFormatScore(const GUID &subtype, UINT32 width, UINT32 height, double fps, int widthHint, int heightHint, double fpsHint) {
+    double score = 0.0;
+    if (widthHint > 0) score += fabs(static_cast<double>(width) - widthHint) * 1000.0;
+    if (heightHint > 0) score += fabs(static_cast<double>(height) - heightHint) * 1000.0;
+    if (fpsHint > 0) {
+        if (fps > 0) score += fabs(fps - fpsHint) * 100.0;
+        else score += 1000000.0;
+    }
+    if (GuidEqual(subtype, MEDIASUBTYPE_NV12)) score -= 20.0;
+    else if (GuidEqual(subtype, MEDIASUBTYPE_YV12) ||
+             GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('I', '4', '2', '0'))) ||
+             GuidEqual(subtype, DshowFourccSubtype(MAKEFOURCC('I', 'Y', 'U', 'V')))) score -= 15.0;
+    else if (GuidEqual(subtype, MEDIASUBTYPE_YUY2)) score -= 10.0;
+    return score;
+}
+
+void DshowFrameDeliver(DshowFrameContext *ctx, const BYTE *data, DWORD length, REFERENCE_TIME startTime, bool haveTime) {
+    if (ctx == nullptr || data == nullptr || length == 0) {
+        return;
+    }
+    EnterCriticalSection(&ctx->lock);
+    if (!ctx->running || ctx->encoder == nullptr) {
+        LeaveCriticalSection(&ctx->lock);
+        return;
+    }
+    LONGLONG duration = ctx->frameDuration > 0 ? ctx->frameDuration : 333333;
+    LONGLONG sampleTime = haveTime ? startTime : ctx->frameIndex * duration;
+    ctx->frameIndex++;
+
+    IMFSample *sample = nullptr;
+    IMFMediaBuffer *buffer = nullptr;
+    HRESULT hr = MFCreateSample(&sample);
+    if (SUCCEEDED(hr)) hr = MFCreateMemoryBuffer(length, &buffer);
+    if (SUCCEEDED(hr)) {
+        BYTE *dst = nullptr;
+        DWORD maxLength = 0;
+        hr = buffer->Lock(&dst, &maxLength, nullptr);
+        if (SUCCEEDED(hr)) {
+            memcpy(dst, data, length);
+            buffer->Unlock();
+            hr = buffer->SetCurrentLength(length);
+        }
+    }
+    if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleTime(sampleTime);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(duration);
+
+    std::vector<EncodedPacket> packets;
+    if (SUCCEEDED(hr)) hr = EncodeH264Sample(ctx->encoder, sample, &packets);
+    SafeRelease(&buffer);
+    SafeRelease(&sample);
+    if (FAILED(hr)) {
+        // * record the failure and wake the capture thread, which reports it exactly once
+        ctx->running = false;
+        ctx->capture->error = WideToUtf8String(CaptureErrorMessage(hr, "encode directshow sample"));
+        LeaveCriticalSection(&ctx->lock);
+        SetEvent(ctx->eosEvent);
+        return;
+    }
+    LeaveCriticalSection(&ctx->lock);
+    for (const auto &packet : packets) {
+        if (!packet.annexb.empty()) {
+            uint32_t pts90k = static_cast<uint32_t>((packet.sampleTime * 9) / 1000);
+            WebrtpUsbWinPacket(ctx->capture->handle, const_cast<uint8_t *>(packet.annexb.data()), static_cast<int>(packet.annexb.size()), pts90k);
+        }
+    }
+}
+
+class DshowSinkEnumMediaTypes : public IEnumMediaTypes {
+public:
+    DshowSinkEnumMediaTypes() : refs(1) {}
+    virtual ~DshowSinkEnumMediaTypes() {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **out) {
+        if (out == nullptr) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IEnumMediaTypes) {
+            *out = static_cast<IEnumMediaTypes *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&refs); }
+    STDMETHODIMP_(ULONG) Release() {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return value;
+    }
+    STDMETHODIMP Next(ULONG count, AM_MEDIA_TYPE **types, ULONG *fetched) {
+        if (types == nullptr) return E_POINTER;
+        if (count > 1 && fetched == nullptr) return E_INVALIDARG;
+        if (fetched != nullptr) *fetched = 0;
+        return S_FALSE;
+    }
+    STDMETHODIMP Skip(ULONG) { return S_FALSE; }
+    STDMETHODIMP Reset() { return S_OK; }
+    STDMETHODIMP Clone(IEnumMediaTypes **out) {
+        if (out == nullptr) return E_POINTER;
+        *out = new DshowSinkEnumMediaTypes();
+        return S_OK;
+    }
+
+private:
+    LONG refs;
+};
+
+class DshowSinkEnumPins : public IEnumPins {
+public:
+    DshowSinkEnumPins(IPin *pin, ULONG index) : refs(1), pin(pin), index(index) {
+        if (pin != nullptr) pin->AddRef();
+    }
+    virtual ~DshowSinkEnumPins() { SafeRelease(&pin); }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **out) {
+        if (out == nullptr) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IEnumPins) {
+            *out = static_cast<IEnumPins *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&refs); }
+    STDMETHODIMP_(ULONG) Release() {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return value;
+    }
+    STDMETHODIMP Next(ULONG count, IPin **out, ULONG *fetched) {
+        if (out == nullptr) return E_POINTER;
+        if (count > 1 && fetched == nullptr) return E_INVALIDARG;
+        ULONG delivered = 0;
+        if (index == 0 && count > 0 && pin != nullptr) {
+            out[0] = pin;
+            pin->AddRef();
+            index = 1;
+            delivered = 1;
+        }
+        if (fetched != nullptr) *fetched = delivered;
+        return delivered == count ? S_OK : S_FALSE;
+    }
+    STDMETHODIMP Skip(ULONG count) {
+        index += count;
+        return index <= 1 ? S_OK : S_FALSE;
+    }
+    STDMETHODIMP Reset() {
+        index = 0;
+        return S_OK;
+    }
+    STDMETHODIMP Clone(IEnumPins **out) {
+        if (out == nullptr) return E_POINTER;
+        *out = new DshowSinkEnumPins(pin, index);
+        return S_OK;
+    }
+
+private:
+    LONG refs;
+    IPin *pin;
+    ULONG index;
+};
+
+class DshowSinkFilter;
+
+class DshowSinkPin : public IPin, public IMemInputPin {
+public:
+    DshowSinkPin(DshowSinkFilter *filter, DshowFrameContext *ctx) : filter(filter), ctx(ctx), connectedPin(nullptr) {
+        memset(&mediaType, 0, sizeof(mediaType));
+    }
+    virtual ~DshowSinkPin() { ResetConnection(); }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **out) {
+        if (out == nullptr) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IPin) {
+            *out = static_cast<IPin *>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IMemInputPin) {
+            *out = static_cast<IMemInputPin *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef();
+    STDMETHODIMP_(ULONG) Release();
+
+    STDMETHODIMP Connect(IPin *, const AM_MEDIA_TYPE *) { return E_UNEXPECTED; }
+    STDMETHODIMP ReceiveConnection(IPin *connector, const AM_MEDIA_TYPE *pmt);
+    STDMETHODIMP Disconnect();
+    STDMETHODIMP ConnectedTo(IPin **out) {
+        if (out == nullptr) return E_POINTER;
+        if (connectedPin == nullptr) {
+            *out = nullptr;
+            return VFW_E_NOT_CONNECTED;
+        }
+        *out = connectedPin;
+        connectedPin->AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP ConnectionMediaType(AM_MEDIA_TYPE *pmt) {
+        if (pmt == nullptr) return E_POINTER;
+        if (connectedPin == nullptr) {
+            memset(pmt, 0, sizeof(*pmt));
+            return VFW_E_NOT_CONNECTED;
+        }
+        return DshowCopyMediaType(pmt, &mediaType);
+    }
+    STDMETHODIMP QueryPinInfo(PIN_INFO *info);
+    STDMETHODIMP QueryDirection(PIN_DIRECTION *dir) {
+        if (dir == nullptr) return E_POINTER;
+        *dir = PINDIR_INPUT;
+        return S_OK;
+    }
+    STDMETHODIMP QueryId(LPWSTR *id) {
+        if (id == nullptr) return E_POINTER;
+        *id = static_cast<LPWSTR>(CoTaskMemAlloc(sizeof(L"input")));
+        if (*id == nullptr) return E_OUTOFMEMORY;
+        memcpy(*id, L"input", sizeof(L"input"));
+        return S_OK;
+    }
+    STDMETHODIMP QueryAccept(const AM_MEDIA_TYPE *pmt) { return DshowSinkTypeAccepted(pmt) ? S_OK : S_FALSE; }
+    STDMETHODIMP EnumMediaTypes(IEnumMediaTypes **out) {
+        if (out == nullptr) return E_POINTER;
+        *out = new DshowSinkEnumMediaTypes();
+        return S_OK;
+    }
+    STDMETHODIMP QueryInternalConnections(IPin **, ULONG *) { return E_NOTIMPL; }
+    STDMETHODIMP EndOfStream() {
+        if (ctx != nullptr) SetEvent(ctx->eosEvent);
+        return S_OK;
+    }
+    STDMETHODIMP BeginFlush() { return S_OK; }
+    STDMETHODIMP EndFlush() { return S_OK; }
+    STDMETHODIMP NewSegment(REFERENCE_TIME, REFERENCE_TIME, double) { return S_OK; }
+
+    STDMETHODIMP GetAllocator(IMemAllocator **out) {
+        if (out != nullptr) *out = nullptr;
+        // * the upstream pin must provide its own allocator
+        return VFW_E_NO_ALLOCATOR;
+    }
+    STDMETHODIMP NotifyAllocator(IMemAllocator *, BOOL) { return S_OK; }
+    STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES *) { return E_NOTIMPL; }
+    STDMETHODIMP Receive(IMediaSample *sample) {
+        if (sample == nullptr) return E_POINTER;
+        BYTE *data = nullptr;
+        if (FAILED(sample->GetPointer(&data)) || data == nullptr) return S_OK;
+        long length = sample->GetActualDataLength();
+        if (length <= 0) return S_OK;
+        REFERENCE_TIME startTime = 0;
+        REFERENCE_TIME endTime = 0;
+        bool haveTime = SUCCEEDED(sample->GetTime(&startTime, &endTime));
+        DshowFrameDeliver(ctx, data, static_cast<DWORD>(length), startTime, haveTime);
+        return S_OK;
+    }
+    STDMETHODIMP ReceiveMultiple(IMediaSample **samples, long count, long *processed) {
+        if (samples == nullptr || processed == nullptr) return E_POINTER;
+        long done = 0;
+        for (long idx = 0; idx < count; idx++) {
+            if (FAILED(Receive(samples[idx]))) break;
+            done++;
+        }
+        *processed = done;
+        return S_OK;
+    }
+    STDMETHODIMP ReceiveCanBlock() { return S_OK; }
+
+    const AM_MEDIA_TYPE *ConnectedType() const { return connectedPin != nullptr ? &mediaType : nullptr; }
+    void ResetConnection() {
+        SafeRelease(&connectedPin);
+        DshowClearMediaType(&mediaType);
+    }
+
+private:
+    DshowSinkFilter *filter;
+    DshowFrameContext *ctx;
+    IPin *connectedPin;
+    AM_MEDIA_TYPE mediaType;
+};
+
+class DshowSinkFilter : public IBaseFilter {
+public:
+    DshowSinkFilter(DshowFrameContext *ctx) : refs(1), state(State_Stopped), graph(nullptr), clock(nullptr) {
+        InitializeCriticalSection(&lock);
+        name[0] = L'\0';
+        pin = new DshowSinkPin(this, ctx);
+    }
+    virtual ~DshowSinkFilter() {
+        delete pin;
+        SafeRelease(&clock);
+        DeleteCriticalSection(&lock);
+    }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **out) {
+        if (out == nullptr) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IPersist || riid == IID_IMediaFilter || riid == IID_IBaseFilter) {
+            *out = static_cast<IBaseFilter *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&refs); }
+    STDMETHODIMP_(ULONG) Release() {
+        LONG value = InterlockedDecrement(&refs);
+        if (value == 0) delete this;
+        return value;
+    }
+
+    STDMETHODIMP GetClassID(CLSID *out) {
+        if (out == nullptr) return E_POINTER;
+        *out = DshowSinkFilterClsid;
+        return S_OK;
+    }
+    STDMETHODIMP Stop() { return StateSet(State_Stopped); }
+    STDMETHODIMP Pause() { return StateSet(State_Paused); }
+    STDMETHODIMP Run(REFERENCE_TIME) { return StateSet(State_Running); }
+    STDMETHODIMP GetState(DWORD, FILTER_STATE *out) {
+        if (out == nullptr) return E_POINTER;
+        EnterCriticalSection(&lock);
+        *out = state;
+        LeaveCriticalSection(&lock);
+        return S_OK;
+    }
+    STDMETHODIMP SetSyncSource(IReferenceClock *newClock) {
+        EnterCriticalSection(&lock);
+        SafeRelease(&clock);
+        clock = newClock;
+        if (clock != nullptr) clock->AddRef();
+        LeaveCriticalSection(&lock);
+        return S_OK;
+    }
+    STDMETHODIMP GetSyncSource(IReferenceClock **out) {
+        if (out == nullptr) return E_POINTER;
+        EnterCriticalSection(&lock);
+        *out = clock;
+        if (*out != nullptr) (*out)->AddRef();
+        LeaveCriticalSection(&lock);
+        return S_OK;
+    }
+    STDMETHODIMP EnumPins(IEnumPins **out) {
+        if (out == nullptr) return E_POINTER;
+        *out = new DshowSinkEnumPins(static_cast<IPin *>(pin), 0);
+        return S_OK;
+    }
+    STDMETHODIMP FindPin(LPCWSTR id, IPin **out) {
+        if (out == nullptr) return E_POINTER;
+        if (id != nullptr && wcscmp(id, L"input") == 0) {
+            *out = static_cast<IPin *>(pin);
+            (*out)->AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return VFW_E_NOT_FOUND;
+    }
+    STDMETHODIMP QueryFilterInfo(FILTER_INFO *info) {
+        if (info == nullptr) return E_POINTER;
+        wcsncpy(info->achName, name, MAX_FILTER_NAME - 1);
+        info->achName[MAX_FILTER_NAME - 1] = L'\0';
+        info->pGraph = graph;
+        if (info->pGraph != nullptr) info->pGraph->AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP JoinFilterGraph(IFilterGraph *newGraph, LPCWSTR newName) {
+        // * the graph pointer is deliberately not addrefed, per the documented contract
+        graph = newGraph;
+        if (newName != nullptr) {
+            wcsncpy(name, newName, MAX_FILTER_NAME - 1);
+            name[MAX_FILTER_NAME - 1] = L'\0';
+        } else {
+            name[0] = L'\0';
+        }
+        return S_OK;
+    }
+    STDMETHODIMP QueryVendorInfo(LPWSTR *) { return E_NOTIMPL; }
+
+    FILTER_STATE StateGet() {
+        EnterCriticalSection(&lock);
+        FILTER_STATE current = state;
+        LeaveCriticalSection(&lock);
+        return current;
+    }
+    DshowSinkPin *SinkPin() { return pin; }
+
+private:
+    HRESULT StateSet(FILTER_STATE next) {
+        EnterCriticalSection(&lock);
+        state = next;
+        LeaveCriticalSection(&lock);
+        return S_OK;
+    }
+
+    LONG refs;
+    FILTER_STATE state;
+    IFilterGraph *graph;
+    IReferenceClock *clock;
+    DshowSinkPin *pin;
+    CRITICAL_SECTION lock;
+    WCHAR name[MAX_FILTER_NAME];
+};
+
+STDMETHODIMP_(ULONG) DshowSinkPin::AddRef() {
+    return filter->AddRef();
+}
+
+STDMETHODIMP_(ULONG) DshowSinkPin::Release() {
+    return filter->Release();
+}
+
+STDMETHODIMP DshowSinkPin::ReceiveConnection(IPin *connector, const AM_MEDIA_TYPE *pmt) {
+    if (connector == nullptr || pmt == nullptr) return E_POINTER;
+    if (connectedPin != nullptr) return VFW_E_ALREADY_CONNECTED;
+    if (filter->StateGet() != State_Stopped) return VFW_E_NOT_STOPPED;
+    if (!DshowSinkTypeAccepted(pmt)) return VFW_E_TYPE_NOT_ACCEPTED;
+    HRESULT hr = DshowCopyMediaType(&mediaType, pmt);
+    if (FAILED(hr)) return hr;
+    connectedPin = connector;
+    connectedPin->AddRef();
+    return S_OK;
+}
+
+STDMETHODIMP DshowSinkPin::Disconnect() {
+    if (filter->StateGet() != State_Stopped) return VFW_E_NOT_STOPPED;
+    if (connectedPin == nullptr) return S_FALSE;
+    ResetConnection();
+    return S_OK;
+}
+
+STDMETHODIMP DshowSinkPin::QueryPinInfo(PIN_INFO *info) {
+    if (info == nullptr) return E_POINTER;
+    memset(info, 0, sizeof(*info));
+    wcsncpy(info->achName, L"input", MAX_PIN_NAME - 1);
+    info->dir = PINDIR_INPUT;
+    info->pFilter = filter;
+    filter->AddRef();
+    return S_OK;
+}
+
+IPin *DshowFindCapturePin(IBaseFilter *filter) {
+    IEnumPins *enumPins = nullptr;
+    if (FAILED(filter->EnumPins(&enumPins)) || enumPins == nullptr) {
+        return nullptr;
+    }
+    IPin *preferred = nullptr;
+    IPin *fallback = nullptr;
+    IPin *pin = nullptr;
+    while (enumPins->Next(1, &pin, nullptr) == S_OK) {
+        PIN_DIRECTION direction;
+        if (FAILED(pin->QueryDirection(&direction)) || direction != PINDIR_OUTPUT) {
+            SafeRelease(&pin);
+            continue;
+        }
+        bool isCapture = false;
+        IKsPropertySet *properties = nullptr;
+        if (SUCCEEDED(pin->QueryInterface(IID_IKsPropertySet, reinterpret_cast<void **>(&properties))) && properties != nullptr) {
+            GUID category = GUID_NULL;
+            DWORD returned = 0;
+            if (SUCCEEDED(properties->Get(AMPROPSETID_Pin, AMPROPERTY_PIN_CATEGORY, nullptr, 0, &category, sizeof(category), &returned)) && GuidEqual(category, PIN_CATEGORY_CAPTURE)) {
+                isCapture = true;
+            }
+            SafeRelease(&properties);
+        }
+        if (isCapture && preferred == nullptr) {
+            preferred = pin;
+            pin = nullptr;
+            continue;
+        }
+        if (fallback == nullptr) {
+            fallback = pin;
+            pin = nullptr;
+            continue;
+        }
+        SafeRelease(&pin);
+    }
+    SafeRelease(&enumPins);
+    if (preferred != nullptr) {
+        SafeRelease(&fallback);
+        return preferred;
+    }
+    // * a minimal software filter may not implement pin categories at all
+    return fallback;
+}
+
+HRESULT DshowChooseCaptureFormat(IPin *pin, int widthHint, int heightHint, double fpsHint, AM_MEDIA_TYPE **chosenOut, IAMStreamConfig **configOut) {
+    if (pin == nullptr || chosenOut == nullptr || configOut == nullptr) {
+        return E_POINTER;
+    }
+    *chosenOut = nullptr;
+    *configOut = nullptr;
+    AM_MEDIA_TYPE *best = nullptr;
+    double bestScore = 0.0;
+    bool bestSet = false;
+    auto consider = [&](AM_MEDIA_TYPE *mediaType) {
+        if (!DshowSinkTypeAccepted(mediaType)) {
+            DshowFreeMediaType(mediaType);
+            return;
+        }
+        UINT32 width = 0;
+        UINT32 height = 0;
+        REFERENCE_TIME avgTimePerFrame = 0;
+        DshowMediaTypeGeometry(mediaType, &width, &height, &avgTimePerFrame);
+        double fps = (avgTimePerFrame > 0) ? 10000000.0 / static_cast<double>(avgTimePerFrame) : 0.0;
+        double score = DshowCaptureFormatScore(mediaType->subtype, width, height, fps, widthHint, heightHint, fpsHint);
+        if (!bestSet || score < bestScore) {
+            if (best != nullptr) DshowFreeMediaType(best);
+            best = mediaType;
+            bestScore = score;
+            bestSet = true;
+            return;
+        }
+        DshowFreeMediaType(mediaType);
+    };
+
+    IAMStreamConfig *config = nullptr;
+    if (SUCCEEDED(pin->QueryInterface(IID_IAMStreamConfig, reinterpret_cast<void **>(&config))) && config != nullptr) {
+        int count = 0;
+        int size = 0;
+        if (SUCCEEDED(config->GetNumberOfCapabilities(&count, &size)) && size == static_cast<int>(sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+            std::vector<BYTE> capsBuffer(static_cast<size_t>(size));
+            for (int idx = 0; idx < count; idx++) {
+                AM_MEDIA_TYPE *mediaType = nullptr;
+                if (FAILED(config->GetStreamCaps(idx, &mediaType, capsBuffer.data())) || mediaType == nullptr) {
+                    continue;
+                }
+                consider(mediaType);
+            }
+        }
+    }
+    if (!bestSet) {
+        IEnumMediaTypes *enumTypes = nullptr;
+        if (SUCCEEDED(pin->EnumMediaTypes(&enumTypes)) && enumTypes != nullptr) {
+            AM_MEDIA_TYPE *mediaType = nullptr;
+            while (enumTypes->Next(1, &mediaType, nullptr) == S_OK) {
+                consider(mediaType);
+                mediaType = nullptr;
+            }
+            SafeRelease(&enumTypes);
+        }
+    }
+    if (!bestSet) {
+        SafeRelease(&config);
+        return VFW_E_INVALIDMEDIATYPE;
+    }
+    *chosenOut = best;
+    *configOut = config;
+    return S_OK;
+}
+
+bool DshowCaptureRun(WinCapture *capture) {
+    if (_wcsicmp(capture->codec.c_str(), L"h264") != 0) {
+        if (!capture->useDshow) {
+            return false;
+        }
+        capture->error = "directshow virtual devices support codec h264 only";
+        return true;
+    }
+
+    std::vector<DshowMonikerEntry> entries;
+    HRESULT hr = DshowCollectMonikers(&entries);
+    if (FAILED(hr)) {
+        DshowReleaseMonikers(&entries);
+        if (!capture->useDshow) {
+            return false;
+        }
+        capture->error = WideToUtf8String(CaptureErrorMessage(hr, "list directshow devices"));
+        return true;
+    }
+    IMoniker *moniker = nullptr;
+    for (auto &entry : entries) {
+        if (entry.devicePathReadable || entry.moniker == nullptr) {
+            continue;
+        }
+        if (_wcsicmp(entry.displayName.c_str(), capture->device.c_str()) == 0 || _wcsicmp(entry.friendlyName.c_str(), capture->device.c_str()) == 0) {
+            moniker = entry.moniker;
+            moniker->AddRef();
+            break;
+        }
+    }
+    DshowReleaseMonikers(&entries);
+    if (moniker == nullptr) {
+        if (!capture->useDshow) {
+            return false;
+        }
+        capture->error = "directshow device not found";
+        return true;
+    }
+
+    IBaseFilter *sourceFilter = nullptr;
+    IPin *sourcePin = nullptr;
+    IGraphBuilder *graph = nullptr;
+    IMediaControl *control = nullptr;
+    DshowSinkFilter *sink = nullptr;
+    AM_MEDIA_TYPE *chosen = nullptr;
+    IAMStreamConfig *config = nullptr;
+    DshowFrameContext ctx = {};
+    H264EncoderContext encoder = {};
+    bool ctxReady = false;
+    bool encoderReady = false;
+    bool controlRunning = false;
+
+    do {
+        hr = moniker->BindToObject(nullptr, nullptr, IID_IBaseFilter, reinterpret_cast<void **>(&sourceFilter));
+        if (FAILED(hr) || sourceFilter == nullptr) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(FAILED(hr) ? hr : E_FAIL, "bind directshow source filter"));
+            break;
+        }
+        sourcePin = DshowFindCapturePin(sourceFilter);
+        if (sourcePin == nullptr) {
+            capture->error = "directshow source exposes no output pin";
+            break;
+        }
+
+        InitializeCriticalSection(&ctx.lock);
+        ctx.capture = capture;
+        ctx.eosEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ctxReady = true;
+        if (ctx.eosEvent == nullptr) {
+            capture->error = "create directshow stream event failed";
+            break;
+        }
+
+        hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER, IID_IGraphBuilder, reinterpret_cast<void **>(&graph));
+        if (FAILED(hr) || graph == nullptr) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(FAILED(hr) ? hr : E_FAIL, "create directshow graph"));
+            break;
+        }
+        hr = graph->AddFilter(sourceFilter, L"source");
+        if (FAILED(hr)) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "add directshow source filter"));
+            break;
+        }
+        sink = new DshowSinkFilter(&ctx);
+        hr = graph->AddFilter(sink, L"webrtpSink");
+        if (FAILED(hr)) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "add directshow sink filter"));
+            break;
+        }
+
+        HRESULT chooseHr = DshowChooseCaptureFormat(sourcePin, capture->width, capture->height, capture->fps, &chosen, &config);
+        if (SUCCEEDED(chooseHr) && config != nullptr && chosen != nullptr) {
+            // * a failed set format is not fatal, the connect chain below decides
+            config->SetFormat(chosen);
+        }
+        IPin *sinkPin = static_cast<IPin *>(sink->SinkPin());
+        hr = E_FAIL;
+        if (chosen != nullptr) {
+            hr = graph->ConnectDirect(sourcePin, sinkPin, chosen);
+        }
+        if (FAILED(hr)) {
+            hr = graph->ConnectDirect(sourcePin, sinkPin, nullptr);
+        }
+        if (FAILED(hr)) {
+            hr = graph->Connect(sourcePin, sinkPin);
+        }
+        if (FAILED(hr)) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "connect directshow source, no supported raw format (nv12, i420, yv12, yuy2) was negotiated, check that the virtual camera is started"));
+            break;
+        }
+
+        const AM_MEDIA_TYPE *connectedType = sink->SinkPin()->ConnectedType();
+        UINT32 width = 0;
+        UINT32 height = 0;
+        REFERENCE_TIME avgTimePerFrame = 0;
+        if (connectedType == nullptr || !DshowMediaTypeGeometry(connectedType, &width, &height, &avgTimePerFrame) || width == 0 || height == 0) {
+            capture->error = "read negotiated directshow media type failed";
+            break;
+        }
+        UINT32 fpsNum = 30;
+        UINT32 fpsDen = 1;
+        if (avgTimePerFrame > 0) {
+            if (FAILED(MFAverageTimePerFrameToFrameRate(static_cast<UINT64>(avgTimePerFrame), &fpsNum, &fpsDen)) || fpsNum == 0) {
+                fpsNum = 30;
+                fpsDen = 1;
+            }
+        } else if (capture->fps > 0) {
+            fpsNum = static_cast<UINT32>(capture->fps * 1000.0 + 0.5);
+            fpsDen = 1000;
+        }
+        GUID inputSubtype = connectedType->subtype;
+        if (GuidEqual(inputSubtype, DshowFourccSubtype(MAKEFOURCC('I', '4', '2', '0')))) {
+            // * identical memory layout, and the encoder documents iyuv rather than i420
+            inputSubtype = MFVideoFormat_IYUV;
+        }
+        UINT32 bitrate = capture->bitrateKbps > 0 ? static_cast<UINT32>(capture->bitrateKbps) * 1000U : 0U;
+        const UINT32 profile = H264ProfileValue(capture->h264Profile);
+        hr = CreateH264Encoder(width, height, fpsNum, fpsDen, bitrate, profile, inputSubtype, &encoder);
+        if (FAILED(hr)) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "create h264 encoder"));
+            break;
+        }
+        encoderReady = true;
+        ctx.encoder = &encoder;
+        ctx.frameDuration = avgTimePerFrame > 0 ? avgTimePerFrame : (fpsNum > 0 ? static_cast<LONGLONG>((10000000.0 * fpsDen) / fpsNum) : 333333);
+        ctx.frameIndex = 0;
+        ctx.running = true;
+
+        hr = graph->QueryInterface(IID_IMediaControl, reinterpret_cast<void **>(&control));
+        if (FAILED(hr) || control == nullptr) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(FAILED(hr) ? hr : E_FAIL, "query directshow media control"));
+            break;
+        }
+        hr = control->Run();
+        if (FAILED(hr)) {
+            capture->error = WideToUtf8String(CaptureErrorMessage(hr, "run directshow graph"));
+            break;
+        }
+        controlRunning = true;
+
+        capture->started = true;
+        SetEvent(capture->readyEvent);
+
+        HANDLE waits[2] = {capture->stopEvent, ctx.eosEvent};
+        DWORD waitResult = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (waitResult == WAIT_OBJECT_0 + 1) {
+            WebrtpUsbWinError(capture->handle, StringDup(capture->error.empty() ? std::string("directshow stream ended") : capture->error));
+        }
+    } while (false);
+
+    // * flag the streaming thread off before stopping the graph, and never stop while holding the lock
+    if (ctxReady) {
+        EnterCriticalSection(&ctx.lock);
+        ctx.running = false;
+        LeaveCriticalSection(&ctx.lock);
+    }
+    if (control != nullptr && controlRunning) {
+        control->Stop();
+    }
+    SafeRelease(&control);
+    if (encoderReady) {
+        CloseH264Encoder(&encoder);
+    }
+    if (chosen != nullptr) {
+        DshowFreeMediaType(chosen);
+    }
+    SafeRelease(&config);
+    SafeRelease(&graph);
+    if (sink != nullptr) {
+        sink->Release();
+        sink = nullptr;
+    }
+    SafeRelease(&sourcePin);
+    SafeRelease(&sourceFilter);
+    SafeRelease(&moniker);
+    if (ctxReady) {
+        if (ctx.eosEvent != nullptr) {
+            CloseHandle(ctx.eosEvent);
+        }
+        DeleteCriticalSection(&ctx.lock);
+    }
+    return true;
 }
 
 }  // namespace

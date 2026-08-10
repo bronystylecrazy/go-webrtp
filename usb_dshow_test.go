@@ -57,6 +57,41 @@ func TestUsbDshowSoftwareDevicesSelect(t *testing.T) {
 	}
 }
 
+func TestUsbDshowDeviceMatch(t *testing.T) {
+	entries := []*UsbDshowMoniker{
+		nil,
+		{Id: "@device:pnp:usb#vid_1234", Name: "16MP USB Camera", DevicePathReadable: true},
+		{Id: "@device:sw:{860BB310}\\{A3FCE0F5}", Name: "OBS Virtual Camera", DevicePathReadable: false},
+		{Id: "@device:sw:{860BB310}\\{OTHER}", Name: "NDI Video", DevicePathReadable: false},
+	}
+	cases := []struct {
+		name   string
+		device string
+		wantId string
+		wantOk bool
+	}{
+		{name: "matchById", device: "@device:sw:{860BB310}\\{A3FCE0F5}", wantId: "@device:sw:{860BB310}\\{A3FCE0F5}", wantOk: true},
+		{name: "matchByIdCaseInsensitive", device: "@DEVICE:SW:{860bb310}\\{a3fce0f5}", wantId: "@device:sw:{860BB310}\\{A3FCE0F5}", wantOk: true},
+		{name: "matchByName", device: "OBS Virtual Camera", wantId: "@device:sw:{860BB310}\\{A3FCE0F5}", wantOk: true},
+		{name: "readablePathNeverMatchesEvenOnExactName", device: "16MP USB Camera", wantOk: false},
+		{name: "readablePathNeverMatchesById", device: "@device:pnp:usb#vid_1234", wantOk: false},
+		{name: "noMatch", device: "Missing Camera", wantOk: false},
+		{name: "emptyDevice", device: "", wantOk: false},
+		{name: "defaultIsReserved", device: "default", wantOk: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, ok := UsbDshowDeviceMatch(entries, tc.device)
+			if ok != tc.wantOk {
+				t.Fatalf("got ok=%v want %v", ok, tc.wantOk)
+			}
+			if ok && entry.Id != tc.wantId {
+				t.Fatalf("got id %q want %q", entry.Id, tc.wantId)
+			}
+		})
+	}
+}
+
 func TestUsbMfKindClassify(t *testing.T) {
 	cases := []struct {
 		hwSource string
