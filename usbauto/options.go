@@ -46,7 +46,8 @@ func defaultOptions() options {
 // Option customizes how usbauto selects and publishes streams.
 type Option func(*options)
 
-// WithTargetFPS sets the preferred source FPS when choosing the best input mode.
+// WithTargetFPS sets the preferred source FPS. Mode selection prefers the lowest advertised
+// rate that meets it, and the pipeline is capped to it when the device only offers higher rates.
 func WithTargetFPS(fps float64) Option {
 	return func(o *options) {
 		if fps > 0 {

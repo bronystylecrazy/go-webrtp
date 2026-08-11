@@ -71,7 +71,6 @@ func Open(ctx context.Context, deviceID string, opts ...Option) (*Camera, error)
 			opt(&cfg)
 		}
 	}
-	cfg = resolveEncoder(cfg)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -80,15 +79,22 @@ func Open(ctx context.Context, deviceID string, opts ...Option) (*Camera, error)
 		return nil, fmt.Errorf("usbauto: ffmpeg not found: %w", err)
 	}
 
+	// * encoder probing runs while the device capability probe below does its own slow work
+	encoderResolved := make(chan options, 1)
+	go func(cfg options) {
+		encoderResolved <- resolveEncoder(cfg)
+	}(cfg)
+
 	input, _, err := resolveInputWithFallback(deviceID, "", cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg = <-encoderResolved
 
 	ffmpegCtx, cancel := context.WithCancel(ctx)
 
-	bestWidth := input.mode.Width
-	bestHeight := input.mode.Height
+	bestWidth := input.output.Width
+	bestHeight := input.output.Height
 	previewWidth, previewHeight := derivePreviewDimensions(bestWidth, bestHeight, cfg.previewHeight)
 
 	camera := &Camera{
@@ -100,14 +106,14 @@ func Open(ctx context.Context, deviceID string, opts ...Option) (*Camera, error)
 		cancel:        cancel,
 		done:          make(chan struct{}),
 		logger:        cfg.logger,
-		source:        input.mode,
+		source:        input.output,
 		device:        input.displayName,
 	}
 	camera.best = &Stream{
 		Name:        "best",
 		Width:       bestWidth,
 		Height:      bestHeight,
-		FrameRate:   input.mode.FrameRate,
+		FrameRate:   input.output.FrameRate,
 		AccessUnits: camera.bestAccess,
 		Keyframes:   camera.bestKeyframes,
 	}
@@ -115,7 +121,7 @@ func Open(ctx context.Context, deviceID string, opts ...Option) (*Camera, error)
 		Name:        "preview",
 		Width:       previewWidth,
 		Height:      previewHeight,
-		FrameRate:   input.mode.FrameRate,
+		FrameRate:   input.output.FrameRate,
 		AccessUnits: camera.previewAccess,
 	}
 	if err := camera.startFFmpeg(ffmpegCtx, input); err != nil {
@@ -144,7 +150,7 @@ func (c *Camera) Preview() *Stream {
 	return c.preview
 }
 
-// SourceMode returns the selected camera input mode.
+// SourceMode returns the mode the pipeline delivers, after any geometry or framerate cap.
 func (c *Camera) SourceMode() Mode {
 	if c == nil {
 		return Mode{}
@@ -313,8 +319,8 @@ func (c *Camera) startFFmpeg(ctx context.Context, input resolvedInput) error {
 		targets = append(targets, "tcp://"+listener.Addr().String())
 	}
 
-	bestWidth := input.mode.Width
-	bestHeight := input.mode.Height
+	bestWidth := input.output.Width
+	bestHeight := input.output.Height
 	previewWidth, previewHeight := derivePreviewDimensions(bestWidth, bestHeight, c.cfg.previewHeight)
 	args := buildFFmpegArgs(input, c.cfg, previewHeight, targets)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -333,26 +339,29 @@ func (c *Camera) startFFmpeg(ctx context.Context, input resolvedInput) error {
 	}
 
 	c.stateMu.Lock()
-	c.source = input.mode
+	c.source = input.output
 	c.device = input.displayName
 	c.best.Width = bestWidth
 	c.best.Height = bestHeight
-	c.best.FrameRate = input.mode.FrameRate
+	c.best.FrameRate = input.output.FrameRate
 	c.preview.Width = previewWidth
 	c.preview.Height = previewHeight
-	c.preview.FrameRate = input.mode.FrameRate
+	c.preview.FrameRate = input.output.FrameRate
 	c.cmd = cmd
 	c.listeners = listeners
 	c.stateMu.Unlock()
 
 	if c.logger != nil {
 		c.logger.Printf(
-			"usbauto: active device=%s input=%s mode=%dx%d@%.2ffps preview=%dx%d encoder=%s",
+			"usbauto: active device=%s input=%s mode=%dx%d@%.2ffps output=%dx%d@%.2ffps preview=%dx%d encoder=%s",
 			c.deviceID,
 			input.format,
+			input.mode.Width,
+			input.mode.Height,
+			input.mode.FrameRate,
 			bestWidth,
 			bestHeight,
-			input.mode.FrameRate,
+			input.output.FrameRate,
 			previewWidth,
 			previewHeight,
 			c.cfg.encoder,
@@ -447,17 +456,19 @@ func buildFFmpegArgs(input resolvedInput, cfg options, previewHeight int, target
 	args = append(args, "-i", formatInputDevice(input.format, input.device))
 
 	sharedFilters := make([]string, 0, 2)
-	if input.mode.FrameRate > 0 {
-		sharedFilters = append(sharedFilters, "fps="+strconv.FormatFloat(input.mode.FrameRate, 'f', -1, 64))
+	if input.output.FrameRate > 0 {
+		sharedFilters = append(sharedFilters, "fps="+strconv.FormatFloat(input.output.FrameRate, 'f', -1, 64))
 	}
-	sharedFilters = append(sharedFilters, "format=yuv420p")
+	// * nv12 passes through untouched while anything else still normalises to a format every encoder accepts
+	sharedFilters = append(sharedFilters, "format=nv12|yuv420p")
+	previewWidth, previewHeightActual := derivePreviewDimensions(input.output.Width, input.output.Height, previewHeight)
 	previewFilter := "null"
-	if previewHeight > 0 && (input.mode.Height == 0 || previewHeight < input.mode.Height) {
+	if previewHeight > 0 && (input.output.Height == 0 || previewHeight < input.output.Height) {
 		previewFilter = fmt.Sprintf("scale=-2:%d", previewHeight)
 	}
 	args = append(args, "-filter_complex", fmt.Sprintf("[0:v]%s,split=2[s0][s1];[s0]null[v0];[s1]%s[v1]", strings.Join(sharedFilters, ","), previewFilter))
 
-	gop := gopForFPS(input.mode.FrameRate)
+	gop := gopForFPS(input.output.FrameRate)
 	for idx, target := range targets {
 		args = append(args, "-map", fmt.Sprintf("[v%d]", idx), "-an", "-c:v", cfg.encoder)
 		args = append(args, append([]string(nil), cfg.encoderArgs...)...)
@@ -467,9 +478,9 @@ func buildFFmpegArgs(input resolvedInput, cfg options, previewHeight int, target
 		args = append(args, "-g", strconv.Itoa(gop), "-keyint_min", strconv.Itoa(gop), "-sc_threshold", "0", "-bf", "0")
 		switch idx {
 		case 0:
-			appendBitrateArgs(&args, cfg.bestBitrateKbps)
+			appendBitrateArgs(&args, outputBitrateKbps(cfg.encoder, cfg.bestBitrateKbps, input.output.Width, input.output.Height, input.output.FrameRate))
 		case 1:
-			appendBitrateArgs(&args, cfg.previewBitrateKbps)
+			appendBitrateArgs(&args, outputBitrateKbps(cfg.encoder, cfg.previewBitrateKbps, previewWidth, previewHeightActual, input.output.FrameRate))
 		}
 		args = append(args, "-f", "h264", target)
 	}

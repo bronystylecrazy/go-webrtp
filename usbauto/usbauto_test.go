@@ -3,7 +3,9 @@ package usbauto
 import (
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gwebrtp "github.com/bronystylecrazy/go-webrtp"
 )
@@ -188,6 +190,7 @@ func TestBuildFFmpegArgsPinsSharedFPS(t *testing.T) {
 			device: "0:none",
 			args:   []string{"-framerate", "10", "-video_size", "3840x2160"},
 			mode:   Mode{Width: 3840, Height: 2160, FrameRate: 10},
+			output: Mode{Width: 3840, Height: 2160, FrameRate: 10},
 		},
 		defaultOptions(),
 		720,
@@ -195,8 +198,218 @@ func TestBuildFFmpegArgsPinsSharedFPS(t *testing.T) {
 	)
 
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "[0:v]fps=10,format=yuv420p,split=2") {
+	if !strings.Contains(joined, "[0:v]fps=10,format=nv12|yuv420p,split=2") {
 		t.Fatalf("expected filter graph to pin fps, got %q", joined)
+	}
+}
+
+func TestFpsForTarget(t *testing.T) {
+	cases := []struct {
+		name   string
+		items  []float64
+		target float64
+		want   float64
+	}{
+		{name: "noTargetPicksHighest", items: []float64{30, 60}, target: 0, want: 60},
+		{name: "lowestRateMeetingTarget", items: []float64{30, 60}, target: 30, want: 30},
+		{name: "unsortedInput", items: []float64{60, 30}, target: 30, want: 30},
+		{name: "onlyHigherRateAdvertised", items: []float64{60}, target: 30, want: 60},
+		{name: "nothingMeetsTargetFallsBackToHighest", items: []float64{5, 10}, target: 30, want: 10},
+		{name: "exactMatch", items: []float64{15, 30, 60}, target: 30, want: 30},
+		{name: "empty", items: nil, target: 30, want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fpsForTarget(tc.items, tc.target); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCappedFrameRate(t *testing.T) {
+	cases := []struct {
+		name   string
+		fps    float64
+		target float64
+		want   float64
+	}{
+		{name: "capsAboveTarget", fps: 60, target: 30, want: 30},
+		{name: "noTargetKeepsRate", fps: 60, target: 0, want: 60},
+		{name: "belowTargetKeepsRate", fps: 25, target: 30, want: 25},
+		{name: "equalKeepsRate", fps: 30, target: 30, want: 30},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cappedFrameRate(tc.fps, tc.target); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectBestModePicksLowestAdvertisedRateMeetingTarget(t *testing.T) {
+	modes := []*gwebrtp.UsbCapabilityMode{
+		{Width: 1920, Height: 1080, Fps: []float64{60, 30}},
+	}
+
+	got := selectBestMode(modes, 30, 0, 0)
+	if got.Width != 1920 || got.Height != 1080 || got.FrameRate != 30 {
+		t.Fatalf("unexpected mode: %+v", got)
+	}
+}
+
+func TestBuildFFmpegArgsCapsPipelineRateAndPassesNv12Through(t *testing.T) {
+	input := resolvedInput{
+		format: "avfoundation",
+		device: "OBS Virtual Camera:none",
+		args:   []string{"-framerate", "60", "-video_size", "1920x1080", "-pixel_format", "nv12"},
+		mode:   Mode{Width: 1920, Height: 1080, FrameRate: 60},
+		output: Mode{Width: 1920, Height: 1080, FrameRate: 30},
+	}
+	cfg := defaultOptions()
+	cfg.encoder = "h264_videotoolbox"
+	cfg.previewHeight = 720
+
+	got := buildFFmpegArgs(input, cfg, cfg.previewHeight, []string{"tcp://127.0.0.1:1", "tcp://127.0.0.1:2"})
+	want := []string{
+		"-hide_banner", "-loglevel", "warning", "-f", "avfoundation",
+		"-framerate", "60", "-video_size", "1920x1080", "-pixel_format", "nv12",
+		"-i", "OBS Virtual Camera:none",
+		"-filter_complex", "[0:v]fps=30,format=nv12|yuv420p,split=2[s0][s1];[s0]null[v0];[s1]scale=-2:720[v1]",
+		"-map", "[v0]", "-an", "-c:v", "h264_videotoolbox", "-profile:v", "high",
+		"-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-bf", "0",
+		"-b:v", "7464k", "-maxrate", "7464k", "-bufsize", "14928k",
+		"-f", "h264", "tcp://127.0.0.1:1",
+		"-map", "[v1]", "-an", "-c:v", "h264_videotoolbox", "-profile:v", "high",
+		"-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-bf", "0",
+		"-b:v", "3317k", "-maxrate", "3317k", "-bufsize", "6634k",
+		"-f", "h264", "tcp://127.0.0.1:2",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ffmpeg args mismatch\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func TestBuildFFmpegArgsKeepsBestFullSizeAndScalesPreview(t *testing.T) {
+	// * the device advertises 1080p but delivers 4k, so the best stream stays 4k for the ai while the preview scales down
+	input := resolvedInput{
+		format: "avfoundation",
+		device: "OBS Virtual Camera:none",
+		args:   []string{"-framerate", "60", "-video_size", "1920x1080", "-pixel_format", "nv12"},
+		mode:   Mode{Width: 1920, Height: 1080, FrameRate: 60},
+		output: Mode{Width: 3840, Height: 2160, FrameRate: 60},
+	}
+	cfg := defaultOptions()
+	cfg.encoder = "h264_videotoolbox"
+	cfg.previewHeight = 1080
+
+	got := buildFFmpegArgs(input, cfg, cfg.previewHeight, []string{"tcp://127.0.0.1:1", "tcp://127.0.0.1:2"})
+	want := []string{
+		"-hide_banner", "-loglevel", "warning", "-f", "avfoundation",
+		"-framerate", "60", "-video_size", "1920x1080", "-pixel_format", "nv12",
+		"-i", "OBS Virtual Camera:none",
+		"-filter_complex", "[0:v]fps=60,format=nv12|yuv420p,split=2[s0][s1];[s0]null[v0];[s1]scale=-2:1080[v1]",
+		"-map", "[v0]", "-an", "-c:v", "h264_videotoolbox", "-profile:v", "high",
+		"-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-bf", "0",
+		"-b:v", "25000k", "-maxrate", "25000k", "-bufsize", "50000k",
+		"-f", "h264", "tcp://127.0.0.1:1",
+		"-map", "[v1]", "-an", "-c:v", "h264_videotoolbox", "-profile:v", "high",
+		"-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-bf", "0",
+		"-b:v", "14929k", "-maxrate", "14929k", "-bufsize", "29858k",
+		"-f", "h264", "tcp://127.0.0.1:2",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ffmpeg args mismatch\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func TestBuildFFmpegArgsKeepsExplicitBitratesAndLibx264Untouched(t *testing.T) {
+	input := resolvedInput{
+		format: "avfoundation",
+		device: "0:none",
+		args:   nil,
+		mode:   Mode{Width: 1920, Height: 1080, FrameRate: 30},
+		output: Mode{Width: 1920, Height: 1080, FrameRate: 30},
+	}
+	cfg := defaultOptions()
+	cfg.encoder = "libx264"
+	joined := strings.Join(buildFFmpegArgs(input, cfg, 0, []string{"tcp://a", "tcp://b"}), " ")
+	if strings.Contains(joined, "-b:v") {
+		t.Fatalf("libx264 must keep crf, got %q", joined)
+	}
+
+	cfg.encoder = "h264_videotoolbox"
+	cfg.bestBitrateKbps = 9000
+	cfg.previewBitrateKbps = 1500
+	joined = strings.Join(buildFFmpegArgs(input, cfg, 0, []string{"tcp://a", "tcp://b"}), " ")
+	if !strings.Contains(joined, "-b:v 9000k") || !strings.Contains(joined, "-b:v 1500k") {
+		t.Fatalf("explicit bitrates must win, got %q", joined)
+	}
+}
+
+func TestDefaultHardwareBitrateKbps(t *testing.T) {
+	cases := []struct {
+		name   string
+		width  int
+		height int
+		fps    float64
+		want   int
+	}{
+		{name: "1080p60", width: 1920, height: 1080, fps: 60, want: 14929},
+		{name: "1080p30", width: 1920, height: 1080, fps: 30, want: 7464},
+		{name: "720p30", width: 1280, height: 720, fps: 30, want: 3317},
+		{name: "4k60ClampsToCeiling", width: 3840, height: 2160, fps: 60, want: 25000},
+		{name: "tinyClampsToFloor", width: 160, height: 120, fps: 30, want: 500},
+		{name: "zeroFpsAssumes30", width: 1920, height: 1080, fps: 0, want: 7464},
+		{name: "zeroGeometry", width: 0, height: 0, fps: 30, want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultHardwareBitrateKbps(tc.width, tc.height, tc.fps); got != tc.want {
+				t.Fatalf("got %d want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEncoderRequiresBitrate(t *testing.T) {
+	for _, name := range []string{"h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"} {
+		if !encoderRequiresBitrate(name) {
+			t.Fatalf("expected %s to require a bitrate default", name)
+		}
+	}
+	for _, name := range []string{"libx264", "", "libopenh264"} {
+		if encoderRequiresBitrate(name) {
+			t.Fatalf("expected %s to keep its own rate control", name)
+		}
+	}
+}
+
+func TestParseShowinfoSize(t *testing.T) {
+	realLine := "[Parsed_showinfo_0 @ 0x79cec09bc0] n:   0 pts:      0 pts_time:0       duration:      0 duration_time:0       fmt:nv12 cl:unspecified sar:0/1 s:3840x2160 i:P iskey:1 type:I checksum:041C8DBF"
+	width, height, ok := parseShowinfoSize(realLine)
+	if !ok || width != 3840 || height != 2160 {
+		t.Fatalf("got %dx%d ok=%v", width, height, ok)
+	}
+	if _, _, ok := parseShowinfoSize("no size here, sar:0/1"); ok {
+		t.Fatal("expected no match")
+	}
+	if _, _, ok := parseShowinfoSize(""); ok {
+		t.Fatal("expected no match on empty output")
+	}
+}
+
+func TestDeliveredGeometry(t *testing.T) {
+	mode := Mode{Width: 1920, Height: 1080}
+	if w, h := deliveredGeometry(mode, 3840, 2160, true); w != 3840 || h != 2160 {
+		t.Fatalf("expected probed geometry to win, got %dx%d", w, h)
+	}
+	if w, h := deliveredGeometry(mode, 0, 0, false); w != 1920 || h != 1080 {
+		t.Fatalf("expected advertised fallback, got %dx%d", w, h)
+	}
+	if w, h := deliveredGeometry(mode, 1920, 1080, true); w != 1920 || h != 1080 {
+		t.Fatalf("expected honest device to stay unchanged, got %dx%d", w, h)
 	}
 }
 
@@ -304,6 +517,100 @@ func TestFfmpegEncoderListedParsesRealOutput(t *testing.T) {
 		if ffmpegEncoderListed(output, name) {
 			t.Fatalf("expected %s not to be detected", name)
 		}
+	}
+}
+
+func TestEncoderSelectHonoursPriorityOrder(t *testing.T) {
+	cases := []struct {
+		name       string
+		candidates []string
+		working    map[string]bool
+		want       string
+	}{
+		{
+			name:       "firstWorkingWins",
+			candidates: []string{"h264_nvenc", "h264_qsv", "h264_amf"},
+			working:    map[string]bool{"h264_qsv": true, "h264_amf": true},
+			want:       "h264_qsv",
+		},
+		{
+			name:       "allWorkingPicksHighestPriority",
+			candidates: []string{"h264_nvenc", "h264_qsv"},
+			working:    map[string]bool{"h264_nvenc": true, "h264_qsv": true},
+			want:       "h264_nvenc",
+		},
+		{
+			name:       "noneWorking",
+			candidates: []string{"h264_nvenc", "h264_qsv"},
+			working:    map[string]bool{},
+			want:       "",
+		},
+		{
+			name:       "noCandidates",
+			candidates: nil,
+			working:    map[string]bool{},
+			want:       "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := encoderSelect(tc.candidates, func(name string) bool {
+				return tc.working[name]
+			})
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEncoderSelectSlowLowPriorityFailureDoesNotStealSelection(t *testing.T) {
+	// * a slow failing low priority probe must not affect the winner
+	got := encoderSelect([]string{"h264_nvenc", "h264_qsv"}, func(name string) bool {
+		if name == "h264_qsv" {
+			time.Sleep(50 * time.Millisecond)
+			return false
+		}
+		return true
+	})
+	if got != "h264_nvenc" {
+		t.Fatalf("got %q want h264_nvenc", got)
+	}
+}
+
+func TestEncoderSelectProbesConcurrently(t *testing.T) {
+	candidates := []string{"h264_nvenc", "h264_qsv", "h264_amf"}
+	var startedGroup sync.WaitGroup
+	startedGroup.Add(len(candidates))
+	allStarted := make(chan struct{})
+	go func() {
+		startedGroup.Wait()
+		close(allStarted)
+	}()
+
+	// * every probe blocks until all probes have started, which deadlocks if probing is sequential
+	probe := func(name string) bool {
+		startedGroup.Done()
+		select {
+		case <-allStarted:
+		case <-time.After(5 * time.Second):
+			t.Errorf("probe %s never saw the others start, probing is not concurrent", name)
+			return false
+		}
+		return name == "h264_amf"
+	}
+
+	done := make(chan string, 1)
+	go func() {
+		done <- encoderSelect(candidates, probe)
+	}()
+	select {
+	case got := <-done:
+		if got != "h264_amf" {
+			t.Fatalf("got %q want h264_amf", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("encoder selection did not finish")
 	}
 }
 

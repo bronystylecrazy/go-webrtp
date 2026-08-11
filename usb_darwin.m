@@ -621,6 +621,13 @@ char *WebrtpUsbMacDeviceCapabilities(const char *device, char **errOut) {
                 if (fpsSet.count == 0) {
                     continue;
                 }
+                // * the capture output converts for any device, so deliverable formats join the declared ones
+                for (NSNumber *value in output.availableVideoCVPixelFormatTypes) {
+                    NSString *deliverable = WebrtpUsbMacFFmpegPixelFormatName((OSType) value.unsignedIntValue);
+                    if (deliverable.length > 0) {
+                        [pixelFormatSet addObject:deliverable];
+                    }
+                }
                 NSMutableArray *fps = [NSMutableArray array];
                 for (NSNumber *value in fpsSet) {
                     [fps addObject:value];

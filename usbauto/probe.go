@@ -1,12 +1,15 @@
 package usbauto
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	gwebrtp "github.com/bronystylecrazy/go-webrtp"
 )
@@ -17,6 +20,7 @@ type resolvedInput struct {
 	displayName string
 	args        []string
 	mode        Mode
+	output      Mode
 }
 
 type linuxModeCandidate struct {
@@ -79,13 +83,83 @@ func resolveInput(deviceID string, cfg options) (resolvedInput, error) {
 		}
 	}
 
+	args := buildInputArgs(format, mode, inputCodec, cfg.inputArgs)
+	deliveredWidth, deliveredHeight := mode.Width, mode.Height
+	if strings.EqualFold(format, "avfoundation") {
+		// * a virtual device can deliver frames larger than its advertised mode, so ask a real frame
+		probedWidth, probedHeight, ok := geometryProbe(format, formatInputDevice(format, inputDevice), args)
+		deliveredWidth, deliveredHeight = deliveredGeometry(mode, probedWidth, probedHeight, ok)
+		if cfg.logger != nil {
+			if !ok {
+				cfg.logger.Printf("usbauto: geometry probe failed, using advertised %dx%d", mode.Width, mode.Height)
+			} else if deliveredWidth != mode.Width || deliveredHeight != mode.Height {
+				cfg.logger.Printf("usbauto: device delivers %dx%d (advertised %dx%d)", deliveredWidth, deliveredHeight, mode.Width, mode.Height)
+			}
+		}
+	}
 	return resolvedInput{
 		format:      format,
 		device:      inputDevice,
 		displayName: displayName,
-		args:        buildInputArgs(format, mode, inputCodec, cfg.inputArgs),
+		args:        args,
 		mode:        mode,
+		// * the best stream keeps the full delivered geometry, only the preview branch scales down
+		output: Mode{
+			Width:     deliveredWidth,
+			Height:    deliveredHeight,
+			FrameRate: cappedFrameRate(mode.FrameRate, cfg.targetFPS),
+		},
 	}, nil
+}
+
+func deliveredGeometry(mode Mode, probedWidth, probedHeight int, ok bool) (int, int) {
+	if ok && probedWidth > 0 && probedHeight > 0 {
+		return probedWidth, probedHeight
+	}
+	return mode.Width, mode.Height
+}
+
+const geometryProbeTimeout = 5 * time.Second
+
+var geometryProbe = ffmpegDeliveredGeometry
+
+func ffmpegDeliveredGeometry(format, device string, inputArgs []string) (int, int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), geometryProbeTimeout)
+	defer cancel()
+
+	// * showinfo logs at info level, so the loglevel must not be lowered here
+	args := []string{"-hide_banner", "-f", format}
+	args = append(args, inputArgs...)
+	args = append(args, "-i", device, "-frames:v", "1", "-vf", "showinfo", "-f", "null", "-")
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	_ = cmd.Run()
+	return parseShowinfoSize(output.String())
+}
+
+var showinfoSizeRE = regexp.MustCompile(`\bs:(\d+)x(\d+)`)
+
+func parseShowinfoSize(output string) (int, int, bool) {
+	match := showinfoSizeRE.FindStringSubmatch(output)
+	if len(match) != 3 {
+		return 0, 0, false
+	}
+	width, _ := strconv.Atoi(match[1])
+	height, _ := strconv.Atoi(match[2])
+	if width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
+// * the device keeps its advertised capture rate, while the pipeline never runs above the target
+func cappedFrameRate(fps, targetFPS float64) float64 {
+	if targetFPS > 0 && fps > targetFPS {
+		return targetFPS
+	}
+	return fps
 }
 
 func selectAutoInputCodec(format string, mode Mode, caps *gwebrtp.UsbDeviceCapabilities) string {
@@ -245,7 +319,7 @@ func selectBestModeWithFilter(modes []*gwebrtp.UsbCapabilityMode, targetFPS floa
 		if maxH > 0 && mode.Height > maxH {
 			continue
 		}
-		fps := highestFPS(mode.Fps)
+		fps := fpsForTarget(mode.Fps, targetFPS)
 		if requireFPS && targetFPS > 0 && fps > 0 && fps < targetFPS {
 			continue
 		}
@@ -267,6 +341,26 @@ func highestFPS(items []float64) float64 {
 		}
 	}
 	return best
+}
+
+// * the lowest advertised rate that still meets the target avoids capturing faster than needed
+func fpsForTarget(items []float64, targetFPS float64) float64 {
+	if targetFPS <= 0 {
+		return highestFPS(items)
+	}
+	best := 0.0
+	for _, fps := range items {
+		if fps < targetFPS {
+			continue
+		}
+		if best == 0 || fps < best {
+			best = fps
+		}
+	}
+	if best > 0 {
+		return best
+	}
+	return highestFPS(items)
 }
 
 func probeLinuxModes(deviceID string) ([]linuxModeCandidate, error) {

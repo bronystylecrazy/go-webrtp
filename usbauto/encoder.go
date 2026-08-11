@@ -25,17 +25,33 @@ func resolveEncoder(cfg options) options {
 		return cfg
 	}
 
-	for _, candidate := range hardwareEncoderCandidates(currentGOOS) {
-		if encoderProbe(candidate) {
-			cfg.encoder = candidate
-			cfg.encoderArgs = nil
-			return cfg
-		}
+	if selected := encoderSelect(hardwareEncoderCandidates(currentGOOS), encoderProbe); selected != "" {
+		cfg.encoder = selected
+		cfg.encoderArgs = nil
+		return cfg
 	}
 
 	cfg.encoder = "libx264"
 	cfg.encoderArgs = defaultLibx264Args()
 	return cfg
+}
+
+// * probe every candidate concurrently but honour priority order, so a hung driver costs one timeout rather than one per candidate
+func encoderSelect(candidates []string, probe func(string) bool) string {
+	results := make([]chan bool, len(candidates))
+	for idx, candidate := range candidates {
+		result := make(chan bool, 1)
+		results[idx] = result
+		go func(name string, result chan<- bool) {
+			result <- probe(name)
+		}(candidate, result)
+	}
+	for idx, result := range results {
+		if <-result {
+			return candidates[idx]
+		}
+	}
+	return ""
 }
 
 // * hardware encoders that accept software frames, so they drop into the existing filter chain unchanged
@@ -57,6 +73,51 @@ func hardwareEncoderCandidates(goos string) []string {
 
 func defaultLibx264Args() []string {
 	return []string{"-preset", "veryfast", "-tune", "zerolatency"}
+}
+
+// * hardware encoders have no quality mode, so an unset bitrate needs a computed default while libx264 keeps crf
+func encoderRequiresBitrate(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, goos := range []string{"darwin", "windows", "linux"} {
+		for _, candidate := range hardwareEncoderCandidates(goos) {
+			if strings.EqualFold(candidate, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// * same bits per pixel heuristic as the native media foundation encoder default
+func defaultHardwareBitrateKbps(width, height int, fps float64) int {
+	if width <= 0 || height <= 0 {
+		return 0
+	}
+	if fps <= 0 {
+		fps = 30
+	}
+	kbps := int(float64(width) * float64(height) * fps * 0.12 / 1000)
+	if kbps < 500 {
+		return 500
+	}
+	// * the ceiling leaves 4k inspection streams enough headroom on a lan while bounding the formula
+	if kbps > 25000 {
+		return 25000
+	}
+	return kbps
+}
+
+func outputBitrateKbps(encoder string, configuredKbps, width, height int, fps float64) int {
+	if configuredKbps > 0 {
+		return configuredKbps
+	}
+	if !encoderRequiresBitrate(encoder) {
+		return 0
+	}
+	return defaultHardwareBitrateKbps(width, height, fps)
 }
 
 func ffmpegSupportsEncoder(name string) bool {
