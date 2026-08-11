@@ -709,19 +709,27 @@ func (r *bitReader) readUE() (uint, bool) {
 }
 
 type annexBNALUReader struct {
-	reader io.Reader
-	buf    []byte
-	eof    bool
+	reader  io.Reader
+	buf     []byte
+	scratch []byte
+	scanned int
+	eof     bool
 }
 
 func newAnnexBNALUReader(r io.Reader) *annexBNALUReader {
-	return &annexBNALUReader{reader: r, buf: make([]byte, 0, 256*1024)}
+	return &annexBNALUReader{reader: r, buf: make([]byte, 0, 256*1024), scratch: make([]byte, 64*1024)}
 }
 
 func (r *annexBNALUReader) Next() ([]byte, error) {
 	for {
 		startPos, startLen := annexBStartCode(r.buf, 0)
 		if startPos < 0 {
+			// * no start code anywhere, so only the last three bytes can still begin one
+			if len(r.buf) > 3 {
+				copy(r.buf, r.buf[len(r.buf)-3:])
+				r.buf = r.buf[:3]
+			}
+			r.scanned = 0
 			if r.eof {
 				return nil, io.EOF
 			}
@@ -733,22 +741,32 @@ func (r *annexBNALUReader) Next() ([]byte, error) {
 		if startPos > 0 {
 			copy(r.buf, r.buf[startPos:])
 			r.buf = r.buf[:len(r.buf)-startPos]
+			r.scanned = 0
+		}
+		if r.scanned < startLen {
+			r.scanned = startLen
 		}
 
-		nextPos, _ := annexBStartCode(r.buf, startLen)
+		nextPos, _ := annexBStartCode(r.buf, r.scanned)
 		if nextPos >= 0 {
 			nalu := append([]byte(nil), r.buf[startLen:nextPos]...)
 			copy(r.buf, r.buf[nextPos:])
 			r.buf = r.buf[:len(r.buf)-nextPos]
+			r.scanned = 0
 			if len(nalu) == 0 {
 				continue
 			}
 			return nalu, nil
 		}
+		// * remember how far the search got so a refill does not rescan the same bytes again
+		if len(r.buf) > 3 {
+			r.scanned = len(r.buf) - 3
+		}
 
 		if r.eof {
 			nalu := append([]byte(nil), r.buf[startLen:]...)
 			r.buf = r.buf[:0]
+			r.scanned = 0
 			if len(nalu) == 0 {
 				return nil, io.EOF
 			}
@@ -762,10 +780,9 @@ func (r *annexBNALUReader) Next() ([]byte, error) {
 }
 
 func (r *annexBNALUReader) fill() error {
-	tmp := make([]byte, 64*1024)
-	n, err := r.reader.Read(tmp)
+	n, err := r.reader.Read(r.scratch)
 	if n > 0 {
-		r.buf = append(r.buf, tmp[:n]...)
+		r.buf = append(r.buf, r.scratch[:n]...)
 	}
 	if err != nil {
 		if err == io.EOF {

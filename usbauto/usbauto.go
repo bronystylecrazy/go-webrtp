@@ -249,11 +249,30 @@ func (c *Camera) handleOutput(ctx context.Context, index int, listener net.Liste
 	}
 	defer conn.Close()
 
+	streamName := "best"
+	if index == 1 {
+		streamName = "preview"
+	}
+	detector := newStaticStreamDetector()
 	pts := uint32(0)
 	frameDur := frameDuration90k(c.source.FrameRate)
 	err = gwebrtp.EachH264AccessUnit(conn, func(au [][]byte) error {
 		packet := cloneAccessUnit(gwebrtp.H264AccessUnit{NALUs: au, PTS90k: pts})
 		pts += frameDur
+		total := 0
+		for _, nalu := range au {
+			total += len(nalu)
+		}
+		switch detector.Push(total) {
+		case staticStreamBecameStatic:
+			if c.logger != nil {
+				c.logger.Printf("usbauto: %s stream looks frozen, the encoder is only emitting skip frames, so the source picture is not changing (virtual camera stopped or capture application closed?)", streamName)
+			}
+		case staticStreamBecameActive:
+			if c.logger != nil {
+				c.logger.Printf("usbauto: %s stream picture is changing again", streamName)
+			}
+		}
 		switch index {
 		case 0:
 			sendLatest(c.bestAccess, packet)
