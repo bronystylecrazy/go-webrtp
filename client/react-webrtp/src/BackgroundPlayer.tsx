@@ -33,6 +33,7 @@ export const BackgroundPlayer = forwardRef<BackgroundPlayerHandle, BackgroundPla
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
   },
   ref,
 ) {
@@ -43,6 +44,7 @@ export const BackgroundPlayer = forwardRef<BackgroundPlayerHandle, BackgroundPla
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
   });
   const handleInfo = useEffectEvent((nextInfo: Parameters<WebRtpInfoCallback>[0]) => {
     onInfo?.(nextInfo);

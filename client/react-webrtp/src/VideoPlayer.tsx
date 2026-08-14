@@ -37,6 +37,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
     autoPlay = true,
     muted = true,
     playsInline = true,
@@ -52,6 +53,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
   });
   const renderClient = stream.client;
   const handleInfo = useEffectEvent((nextInfo: Parameters<WebRtpInfoCallback>[0]) => {

@@ -70,6 +70,7 @@ export const DeskView = forwardRef<DeskViewHandle, DeskViewProps>(function DeskV
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
     canvasProps,
     style,
     ...divProps
@@ -82,6 +83,7 @@ export const DeskView = forwardRef<DeskViewHandle, DeskViewProps>(function DeskV
     maxReconnectDelayMs,
     lateFrameThreshold,
     maxPendingDecode,
+    idleTimeoutMs,
   });
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);

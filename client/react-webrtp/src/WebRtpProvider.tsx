@@ -119,7 +119,7 @@ export interface WebRtpStreamProps extends WebRtpClientOptions {
   url: string;
 }
 
-export function WebRtpStream({ url, autoReconnect, reconnectDelayMs, maxReconnectDelayMs, lateFrameThreshold, maxPendingDecode }: WebRtpStreamProps) {
+export function WebRtpStream({ url, autoReconnect, reconnectDelayMs, maxReconnectDelayMs, lateFrameThreshold, maxPendingDecode, idleTimeoutMs }: WebRtpStreamProps) {
   const registry = useRequiredRegistry();
 
   useEffect(() => {
@@ -129,11 +129,12 @@ export function WebRtpStream({ url, autoReconnect, reconnectDelayMs, maxReconnec
       maxReconnectDelayMs,
       lateFrameThreshold,
       maxPendingDecode,
+      idleTimeoutMs,
     });
     return () => {
       registry.release(url);
     };
-  }, [registry, url, autoReconnect, reconnectDelayMs, maxReconnectDelayMs, lateFrameThreshold, maxPendingDecode]);
+  }, [registry, url, autoReconnect, reconnectDelayMs, maxReconnectDelayMs, lateFrameThreshold, maxPendingDecode, idleTimeoutMs]);
 
   return null;
 }
@@ -164,6 +165,7 @@ export function useWebRtpStream(url: string, options: WebRtpClientOptions = {}):
     options.maxReconnectDelayMs,
     options.lateFrameThreshold,
     options.maxPendingDecode,
+    options.idleTimeoutMs,
   ]);
 
   const client = registry.getClient(url);
@@ -184,6 +186,7 @@ export function useWebRtpStream(url: string, options: WebRtpClientOptions = {}):
       options.maxReconnectDelayMs,
       options.lateFrameThreshold,
       options.maxPendingDecode,
+      options.idleTimeoutMs,
       registry,
       url,
     ],

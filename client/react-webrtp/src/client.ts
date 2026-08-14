@@ -14,10 +14,19 @@ export interface WebRtpClientOptions {
   maxReconnectDelayMs?: number;
   lateFrameThreshold?: number;
   maxPendingDecode?: number;
+  idleTimeoutMs?: number;
 }
 
 export interface WebRtpEvent {
-  type: 'connecting' | 'open' | 'close' | 'error' | 'reconnect-scheduled' | 'decoder-selected' | 'decoder-stalled';
+  type:
+    | 'connecting'
+    | 'open'
+    | 'close'
+    | 'error'
+    | 'reconnect-scheduled'
+    | 'decoder-selected'
+    | 'decoder-stalled'
+    | 'idle-timeout';
   wsUrl: string;
   reconnectDelayMs?: number;
   event?: Event | CloseEvent;
@@ -62,6 +71,7 @@ export class WebRtpClient {
   private closed = false;
   private reconnectTimer: number | null = null;
   private decoderWatchdogTimer: number | null = null;
+  private idleTimer: number | null = null;
   private reconnectDelay: number;
   private pendingDecode = 0;
   private waitingForKeyframe = false;
@@ -79,6 +89,7 @@ export class WebRtpClient {
       maxReconnectDelayMs: options.maxReconnectDelayMs ?? 5000,
       lateFrameThreshold: options.lateFrameThreshold ?? 16,
       maxPendingDecode: options.maxPendingDecode ?? 8,
+      idleTimeoutMs: options.idleTimeoutMs ?? 10_000,
     };
     this.reconnectDelay = this.options.reconnectDelayMs;
     this.connect();
@@ -92,6 +103,7 @@ export class WebRtpClient {
     const ws = new WebSocket(this.wsUrl);
     this.ws = ws;
     ws.binaryType = 'arraybuffer';
+    this.scheduleIdleWatchdog();
     ws.onopen = (event) => {
       if (this.ws !== ws || this.closed) {
         return;
@@ -126,6 +138,7 @@ export class WebRtpClient {
       return;
     }
     this.resetStreamState();
+    this.clearIdleWatchdog();
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
     }
@@ -138,6 +151,40 @@ export class WebRtpClient {
       this.connect();
     }, this.reconnectDelay);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.options.maxReconnectDelayMs);
+  }
+
+  private scheduleIdleWatchdog(): void {
+    if (this.idleTimer !== null) {
+      window.clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.closed) {
+      return;
+    }
+    this.idleTimer = window.setTimeout(() => {
+      this.idleTimer = null;
+      this.onIdleTimeout();
+    }, this.options.idleTimeoutMs);
+  }
+
+  private clearIdleWatchdog(): void {
+    if (this.idleTimer !== null) {
+      window.clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private onIdleTimeout(): void {
+    if (this.closed || !this.ws) {
+      return;
+    }
+    // An open socket that stays silent is either half-open or a server that
+    // stopped sending. Reconnect to get fresh state either way.
+    this.emitEvent({ type: 'idle-timeout', wsUrl: this.wsUrl });
+    const ws = this.ws;
+    this.ws = null;
+    ws.close();
+    this.scheduleReconnect();
   }
 
   private resetStreamState(): void {
@@ -167,6 +214,7 @@ export class WebRtpClient {
   }
 
   private onMessage(event: MessageEvent): void {
+    this.scheduleIdleWatchdog();
     if (this.paused) {
       return;
     }
@@ -739,6 +787,7 @@ export class WebRtpClient {
       window.clearTimeout(this.decoderWatchdogTimer);
       this.decoderWatchdogTimer = null;
     }
+    this.clearIdleWatchdog();
     this.resetStreamState();
     this.detach();
     if (this.canvasStream) {
