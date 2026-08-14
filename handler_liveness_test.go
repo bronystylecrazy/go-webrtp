@@ -1,6 +1,7 @@
 package webrtp
 
 import (
+	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -43,20 +44,16 @@ func dialLivenessClient(t *testing.T, url string) *websocket.Conn {
 }
 
 func isTimeoutErr(err error) bool {
-	netErr, ok := err.(net.Error)
-	return ok && netErr.Timeout()
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func TestHandlerClosesClientWhenInitNeverArrives(t *testing.T) {
-	origTimeout := initWaitTimeout
-	initWaitTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { initWaitTimeout = origTimeout })
-
-	inst := Init(&Config{Logger: stdLogger{}})
+	inst := Init(&Config{Logger: stdLogger{}, InitWaitTimeout: 300 * time.Millisecond})
 	url := startLivenessServer(t, inst)
 	conn := dialLivenessClient(t, url)
 
-	_ = conn.SetReadDeadline(time.Now().Add(initWaitTimeout + 1500*time.Millisecond))
+	_ = conn.SetReadDeadline(time.Now().Add(1800 * time.Millisecond))
 	_, _, err := conn.ReadMessage()
 	if err == nil {
 		t.Fatal("expected the server to close the connection, got a message instead")
@@ -67,15 +64,11 @@ func TestHandlerClosesClientWhenInitNeverArrives(t *testing.T) {
 }
 
 func TestHandlerServesLateInitToReconnectingClient(t *testing.T) {
-	origTimeout := initWaitTimeout
-	initWaitTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { initWaitTimeout = origTimeout })
-
-	inst := Init(&Config{Logger: stdLogger{}})
+	inst := Init(&Config{Logger: stdLogger{}, InitWaitTimeout: 300 * time.Millisecond})
 	url := startLivenessServer(t, inst)
 
 	first := dialLivenessClient(t, url)
-	_ = first.SetReadDeadline(time.Now().Add(initWaitTimeout + 1500*time.Millisecond))
+	_ = first.SetReadDeadline(time.Now().Add(1800 * time.Millisecond))
 	if _, _, err := first.ReadMessage(); err == nil || isTimeoutErr(err) {
 		t.Fatalf("expected the first client to be closed by the server, got %v", err)
 	}
@@ -95,12 +88,11 @@ func TestHandlerServesLateInitToReconnectingClient(t *testing.T) {
 }
 
 func TestHandlerDropsSubscriberWhenPongsStop(t *testing.T) {
-	origPing, origPong := pingPeriod, pongWait
-	pingPeriod = 150 * time.Millisecond
-	pongWait = 500 * time.Millisecond
-	t.Cleanup(func() { pingPeriod, pongWait = origPing, origPong })
-
-	inst := Init(&Config{Logger: stdLogger{}})
+	inst := Init(&Config{
+		Logger:    stdLogger{},
+		PingPeriod: 150 * time.Millisecond,
+		PongWait:  500 * time.Millisecond,
+	})
 	inst.hub.SetInit([]byte("init-segment"))
 	url := startLivenessServer(t, inst)
 
@@ -130,12 +122,11 @@ func TestHandlerDropsSubscriberWhenPongsStop(t *testing.T) {
 }
 
 func TestHandlerKeepsSubscriberThatAnswersPings(t *testing.T) {
-	origPing, origPong := pingPeriod, pongWait
-	pingPeriod = 150 * time.Millisecond
-	pongWait = 500 * time.Millisecond
-	t.Cleanup(func() { pingPeriod, pongWait = origPing, origPong })
-
-	inst := Init(&Config{Logger: stdLogger{}})
+	inst := Init(&Config{
+		Logger:    stdLogger{},
+		PingPeriod: 150 * time.Millisecond,
+		PongWait:  500 * time.Millisecond,
+	})
 	inst.hub.SetInit([]byte("init-segment"))
 	url := startLivenessServer(t, inst)
 

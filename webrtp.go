@@ -60,6 +60,13 @@ type Config struct {
 	ReadBufferSize        int
 	WriteBufferSize       int
 	H264AccessUnitHandler func(H264AccessUnit)
+	// InitWaitTimeout closes a client that connected before the stream
+	// produced its init segment, so its reconnect loop can retry.
+	InitWaitTimeout time.Duration
+	// PingPeriod is how often a subscribed client is pinged.
+	PingPeriod time.Duration
+	// PongWait is how long a subscriber may stay silent before it is dropped.
+	PongWait time.Duration
 }
 
 type Instance struct {
@@ -103,6 +110,18 @@ func Init(cfg *Config) *Instance {
 	if sourceType == "" {
 		sourceType = "rtsp"
 	}
+	initWaitTimeout := cfg.InitWaitTimeout
+	if initWaitTimeout <= 0 {
+		initWaitTimeout = defaultInitWaitTimeout
+	}
+	pingPeriod := cfg.PingPeriod
+	if pingPeriod <= 0 {
+		pingPeriod = defaultPingPeriod
+	}
+	pongWait := cfg.PongWait
+	if pongWait <= 0 {
+		pongWait = defaultPongWait
+	}
 	inst := &Instance{
 		cfg: &Config{
 			SourceType:            sourceType,
@@ -127,6 +146,9 @@ func Init(cfg *Config) *Instance {
 			ReadBufferSize:        readBuf,
 			WriteBufferSize:       writeBuf,
 			H264AccessUnitHandler: cfg.H264AccessUnitHandler,
+			InitWaitTimeout:       initWaitTimeout,
+			PingPeriod:            pingPeriod,
+			PongWait:              pongWait,
 		},
 		hub:      NewHub(),
 		logger:   logger,

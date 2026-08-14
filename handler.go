@@ -1,6 +1,8 @@
 package webrtp
 
 import (
+	"errors"
+	"net"
 	"time"
 
 	"github.com/gofiber/contrib/v3/websocket"
@@ -9,22 +11,37 @@ import (
 
 const resumeKeyframeTimeout = 2 * time.Second
 
-// Subscriber liveness durations. Package-level vars so tests can shorten them.
-var (
-	// initWaitTimeout closes a client that connected before the stream produced
-	// its init segment, so the client reconnect loop retries instead of parking
-	// on a silent connection.
-	initWaitTimeout = 15 * time.Second
-	// pingPeriod is how often a subscribed client is pinged.
-	pingPeriod = 15 * time.Second
-	// pongWait is how long a subscriber may stay silent before it is dropped.
-	pongWait = 45 * time.Second
+// Subscriber liveness defaults; override per instance through Config.
+const (
+	defaultInitWaitTimeout = 15 * time.Second
+	defaultPingPeriod      = 15 * time.Second
+	defaultPongWait        = 45 * time.Second
 )
 
+// rawConnExposer exposes the raw socket behind a hijacked connection.
+type rawConnExposer interface {
+	UnsafeConn() net.Conn
+}
+
+// closeUnderlyingConn closes the raw socket behind a websocket connection.
+// Hijacked fasthttp connections ignore Close until the websocket wrapper has
+// returned, so this is the only way to unblock a reader from the handler.
+func closeUnderlyingConn(conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	raw := conn.UnderlyingConn()
+	if exposer, ok := raw.(rawConnExposer); ok {
+		_ = exposer.UnsafeConn().Close()
+		return
+	}
+	_ = raw.Close()
+}
+
 type resumeWaitState struct {
-	waiting         bool
-	requested       bool
-	waitingStarted  time.Time
+	waiting        bool
+	requested      bool
+	waitingStarted time.Time
 }
 
 func (r *Instance) Handler() fiber.Handler {
@@ -43,51 +60,73 @@ func (r *Instance) HandleWebsocket(conn *websocket.Conn) {
 }
 
 func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
-	defer conn.Close()
 	r.logger.Printf("client connected: %s", conn.RemoteAddr())
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// A subscriber that stays silent for pongWait (no pong, no close frame)
-		// fails the read deadline and the connection is torn down.
-		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		// A subscriber that stays silent for pongWait (no pong, no close
+		// frame) fails the read deadline and is dropped. Any read error is
+		// terminal on this connection, which is fine here: it is closed.
+		_ = conn.SetReadDeadline(time.Now().Add(r.cfg.PongWait))
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+			_ = conn.SetReadDeadline(time.Now().Add(r.cfg.PongWait))
 			return nil
 		})
 		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					r.logger.Printf("subscriber silent for %s, dropping: %s", r.cfg.PongWait, conn.RemoteAddr())
+				}
 				break
 			}
 		}
 	}()
 
-	initData := hub.GetInit()
-	waitTicker := time.NewTicker(100 * time.Millisecond)
-	defer waitTicker.Stop()
-	initDeadline := time.NewTimer(initWaitTimeout)
-	defer initDeadline.Stop()
-	waitingLogged := false
-	for initData == nil {
-		if !waitingLogged {
-			r.logger.Printf("stream not ready, waiting %s", conn.RemoteAddr())
-			waitingLogged = true
+	// ch is nil until the client is subscribed. Cleanup tells the client to
+	// reconnect with a close frame, forces the underlying socket closed so
+	// the reader goroutine unblocks, and joins it before returning: nothing
+	// may touch the connection after the websocket wrapper recycles it.
+	var ch chan *Frame
+	defer func() {
+		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "stream unavailable"))
+		closeUnderlyingConn(conn)
+		<-done
+		if ch != nil {
+			hub.Unsubscribe(ch)
 		}
-		select {
-		case <-waitTicker.C:
-			initData = hub.GetInit()
-		case <-initDeadline.C:
-			r.logger.Printf("stream not ready after %s, closing client %s", initWaitTimeout, conn.RemoteAddr())
-			return
-		case <-done:
-			r.logger.Printf("client disconnected while waiting: %s", conn.RemoteAddr())
-			return
+		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
+	}()
+
+	initData := hub.GetInit()
+	if initData == nil {
+		waitTicker := time.NewTicker(100 * time.Millisecond)
+		defer waitTicker.Stop()
+		initDeadline := time.NewTimer(r.cfg.InitWaitTimeout)
+		defer initDeadline.Stop()
+		waitingLogged := false
+		for initData == nil {
+			if !waitingLogged {
+				r.logger.Printf("stream not ready, waiting %s", conn.RemoteAddr())
+				waitingLogged = true
+			}
+			select {
+			case <-waitTicker.C:
+				initData = hub.GetInit()
+			case <-initDeadline.C:
+				r.logger.Printf("stream not ready after %s, closing client %s", r.cfg.InitWaitTimeout, conn.RemoteAddr())
+				return
+			case <-done:
+				return
+			}
 		}
 	}
 
-	initData, startupFrames, ch := hub.SubscribeWithStartupSnapshot()
+	subscriptionInit, startupFrames, subscribed := hub.SubscribeWithStartupSnapshot()
+	initData = subscriptionInit
+	ch = subscribed
 	var startupFrameNo uint64
 	for _, startupFrame := range startupFrames {
 		if startupFrame != nil && startupFrame.FrameNo > startupFrameNo {
@@ -97,7 +136,6 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteMessage(websocket.BinaryMessage, initData); err != nil {
-		hub.Unsubscribe(ch)
 		return
 	}
 	for _, startupFrame := range startupFrames {
@@ -106,18 +144,13 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
 		if err := conn.WriteMessage(websocket.BinaryMessage, startupFrame.Data); err != nil {
-			hub.Unsubscribe(ch)
 			return
 		}
 	}
-	defer func() {
-		hub.Unsubscribe(ch)
-		r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
-	}()
 
 	expectedNextFrameNo := startupFrameNo + 1
 	resumeState := &resumeWaitState{}
-	pingTicker := time.NewTicker(pingPeriod)
+	pingTicker := time.NewTicker(r.cfg.PingPeriod)
 	defer pingTicker.Stop()
 	for {
 		select {
@@ -150,7 +183,6 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 				return
 			}
 		case <-done:
-			r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 			return
 		}
 	}
