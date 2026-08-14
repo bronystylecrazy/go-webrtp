@@ -9,6 +9,18 @@ import (
 
 const resumeKeyframeTimeout = 2 * time.Second
 
+// Subscriber liveness durations. Package-level vars so tests can shorten them.
+var (
+	// initWaitTimeout closes a client that connected before the stream produced
+	// its init segment, so the client reconnect loop retries instead of parking
+	// on a silent connection.
+	initWaitTimeout = 15 * time.Second
+	// pingPeriod is how often a subscribed client is pinged.
+	pingPeriod = 15 * time.Second
+	// pongWait is how long a subscriber may stay silent before it is dropped.
+	pongWait = 45 * time.Second
+)
+
 type resumeWaitState struct {
 	waiting         bool
 	requested       bool
@@ -37,6 +49,13 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// A subscriber that stays silent for pongWait (no pong, no close frame)
+		// fails the read deadline and the connection is torn down.
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
 		for {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -48,6 +67,8 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 	initData := hub.GetInit()
 	waitTicker := time.NewTicker(100 * time.Millisecond)
 	defer waitTicker.Stop()
+	initDeadline := time.NewTimer(initWaitTimeout)
+	defer initDeadline.Stop()
 	waitingLogged := false
 	for initData == nil {
 		if !waitingLogged {
@@ -57,6 +78,9 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 		select {
 		case <-waitTicker.C:
 			initData = hub.GetInit()
+		case <-initDeadline.C:
+			r.logger.Printf("stream not ready after %s, closing client %s", initWaitTimeout, conn.RemoteAddr())
+			return
 		case <-done:
 			r.logger.Printf("client disconnected while waiting: %s", conn.RemoteAddr())
 			return
@@ -93,26 +117,42 @@ func (r *Instance) handleHubWebsocket(conn *websocket.Conn, hub *Hub) {
 
 	expectedNextFrameNo := startupFrameNo + 1
 	resumeState := &resumeWaitState{}
-	for frame := range ch {
-		if frame == nil {
-			continue
-		}
-		if frame.FrameNo <= startupFrameNo {
-			continue
-		}
-		send, closeConn := r.handleResumeGap(resumeState, frame, expectedNextFrameNo)
-		if closeConn {
-			r.logger.Printf("closing stalled client after frame gap: %s", conn.RemoteAddr())
+	pingTicker := time.NewTicker(pingPeriod)
+	defer pingTicker.Stop()
+	for {
+		select {
+		case frame, ok := <-ch:
+			if !ok {
+				return
+			}
+			if frame == nil {
+				continue
+			}
+			if frame.FrameNo <= startupFrameNo {
+				continue
+			}
+			send, closeConn := r.handleResumeGap(resumeState, frame, expectedNextFrameNo)
+			if closeConn {
+				r.logger.Printf("closing stalled client after frame gap: %s", conn.RemoteAddr())
+				return
+			}
+			if !send {
+				continue
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
+			if err := conn.WriteMessage(websocket.BinaryMessage, frame.Data); err != nil {
+				return
+			}
+			expectedNextFrameNo = frame.FrameNo + 1
+		case <-pingTicker.C:
+			_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case <-done:
+			r.logger.Printf("client disconnected: %s", conn.RemoteAddr())
 			return
 		}
-		if !send {
-			continue
-		}
-		_ = conn.SetWriteDeadline(time.Now().Add(r.cfg.WriteTimeout))
-		if err := conn.WriteMessage(websocket.BinaryMessage, frame.Data); err != nil {
-			return
-		}
-		expectedNextFrameNo = frame.FrameNo + 1
 	}
 }
 
@@ -127,6 +167,8 @@ func (r *Instance) handleResumeGap(state *resumeWaitState, frame *Frame, expecte
 		if !state.requested {
 			if err := r.ForceNextKeyFrame(); err == nil {
 				r.logger.Printf("requested recovery keyframe after client frame gap")
+			} else {
+				r.logger.Printf("recovery keyframe unavailable after client frame gap: %v", err)
 			}
 			state.requested = true
 		}
