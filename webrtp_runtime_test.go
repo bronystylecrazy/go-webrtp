@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,12 +30,23 @@ func (c *fakeKeyframeRequesterConn) ForceNextKeyFrame() error {
 }
 
 type captureKeyframer struct {
+	mu    sync.Mutex
 	frame *Keyframe
 }
 
 func (c *captureKeyframer) HandleKeyframe(frame *Keyframe) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.frame = frame
 	return nil
+}
+
+// snapshot returns the captured frame; the sink goroutine writes it
+// concurrently, so reads must be synchronized.
+func (c *captureKeyframer) snapshot() *Keyframe {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.frame
 }
 
 func TestPublishH264AccessUnitInvokesRawHandler(t *testing.T) {
@@ -277,14 +289,15 @@ func TestKeyframeSinkEmitCustomKeyframeCopiesPayloadAndMetadata(t *testing.T) {
 	if err := sink.emitCustomKeyframe(12, "h264", 640, 480, payload, true, true, 0.1, 0.2, 0.9); err != nil {
 		t.Fatalf("emitCustomKeyframe: %v", err)
 	}
-	if capture.frame == nil {
+	frame := capture.snapshot()
+	if frame == nil {
 		t.Fatal("expected custom keyframer to receive a frame")
 	}
-	if capture.frame.StreamName != "desk" || capture.frame.FrameNo != 12 || capture.frame.Format != "png" {
-		t.Fatalf("unexpected keyframe metadata: %+v", capture.frame)
+	if frame.StreamName != "desk" || frame.FrameNo != 12 || frame.Format != "png" {
+		t.Fatalf("unexpected keyframe metadata: %+v", frame)
 	}
 	payload[0] = 0xff
-	if capture.frame.Payload[0] != 0xaa {
+	if frame.Payload[0] != 0xaa {
 		t.Fatal("expected payload copy to be isolated from caller mutation")
 	}
 }
@@ -309,17 +322,19 @@ func TestPublishH264AccessUnitInvokesCustomKeyframerWithoutSinkTarget(t *testing
 	inst.PublishH264AccessUnit(testH264IDRAccessUnit(), 9000)
 
 	deadline := time.Now().Add(2 * time.Second)
-	for capture.frame == nil && time.Now().Before(deadline) {
+	frame := capture.snapshot()
+	for frame == nil && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+		frame = capture.snapshot()
 	}
 
-	if capture.frame == nil {
+	if frame == nil {
 		t.Fatal("expected custom keyframer to receive a frame without keyframeSink targets")
 	}
-	if capture.frame.StreamName != "full" || capture.frame.Format != "h264" {
-		t.Fatalf("unexpected keyframe payload metadata: %+v", capture.frame)
+	if frame.StreamName != "full" || frame.Format != "h264" {
+		t.Fatalf("unexpected keyframe payload metadata: %+v", frame)
 	}
-	if len(capture.frame.Payload) == 0 {
+	if len(frame.Payload) == 0 {
 		t.Fatal("expected custom keyframer payload")
 	}
 }
